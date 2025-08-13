@@ -11,14 +11,15 @@ This document consolidates the steps from SSdata to marinidicators for caluclati
 ```{r}
 #setup
 library(devtools)
+#setup
+library(devtools)
 #library(SSdata)
 library(here)
 library(tidyverse)
 library(readxl)
-library(marindicators)
+install_github("dempseydanielle/marindicators")
 library(missForest)
 install_github("jamiectam/SSdata")
-
 
 ```
 
@@ -79,7 +80,7 @@ stratifyBiomass(path=path, s.year=start.year, e.year=end.year, areas=areas.RV,
                 lengthbased=FALSE, 
                  qadjusted=FALSE)
 
- RVdataframe(path = path, s.year = start.year, e.year = end.year, areas = areas.RV,
+RVdataframe(path = path, s.year = start.year, e.year = end.year, areas = areas.RV,
             lengthbased = TRUE,
             qadjusted = TRUE,
             update_RV = FALSE,
@@ -350,17 +351,17 @@ HER_length_strat <- rbind(adj_length, acoustic_length)
 
 dir.create(paste(path, "/output/RV/herring_output", sep = ""), recursive = FALSE, showWarnings = T)
 
-write_csv(HER_agg_wss, 
-          path = paste(path, "/output/RV/herring_output/wss_notlengthbased_herring.csv", sep = ""))
+save(HER_agg_wss, 
+          file = paste(path, "/output/RV/herring_output/wss_notlengthbased_herring.Rdata", sep = ""))
 
-write_csv(HER_length_wss, 
-          path = paste(path, "/output/RV/herring_output/wss_lengthbased_herring.csv", sep = ""))
+save(HER_length_wss, 
+          file = paste(path, "/output/RV/herring_output/wss_lengthbased_herring.Rdata", sep = ""))
 
-write_csv(HER_agg_strat, 
-          path = paste(path, "/output/RV/herring_output/strat_notlengthbased_herring.csv", sep = ""))
+save(HER_agg_strat, 
+          file = paste(path, "/output/RV/herring_output/strat_notlengthbased_herring.Rdata", sep = ""))
 
-write_csv(HER_length_strat, 
-          path = paste(path, "/output/RV/herring_output/strat_lengthbased_herring.csv", sep = ""))
+save(HER_length_strat, 
+          file = paste(path, "/output/RV/herring_output/strat_lengthbased_herring.Rdata", sep = ""))
 
 ```
   
@@ -550,7 +551,7 @@ write_csv(lw_strat,
 
 
 ```
-      
+    
       
 ## calculate NAFO indicators                          
 ```{r}
@@ -657,7 +658,7 @@ inds <- extractAll(X = RV,
 # inds <- rbind(inds.ess, inds.wss)
 
 
-#the extractAll produces error above. 
+#the extractAll produces error 
 #Biodiversity, Structure and Functioning, Stability and Resistance, Resource Potential, and Fishing Pressure
 
 # allBiodiversity
@@ -742,18 +743,25 @@ inds_pote<-allPotential(X=RV,
   export.id = NULL
   )
 
+#Need to join tables here****
+inds<-inds_biodiv %>%
+  left_join(inds_pote, by = c("ID", "YEAR")) %>%
+  left_join(inds_press, by =c("ID", "YEAR")) %>%
+  left_join(inds_stab, by = c("ID", "YEAR")) %>%
+  left_join(inds_struct, by =c("ID", "YEAR")) 
 
 # save YEAR and ID to add into inds_imp dataframe
 YEAR <- inds$YEAR
 ID <- inds$ID
 
+##something weird here no Biomass_TL2 in dataframe.
 # BIOMASS_TL2 because only using values after 1998 (added back in to allIndicators below)
-BIOMASS_TL2 <- inds %>% 
-  dplyr::select(YEAR, ID, BIOMASS_TL2) %>% 
-  filter(YEAR >= 1999)
-
-# remove BIOMASS_TL2 from inds so it is not used in the imputation (consistent with esswss)
-inds <- inds %>% dplyr::select(-BIOMASS_TL2)
+# BIOMASS_TL2 <- inds %>% 
+#   dplyr::select(YEAR, ID, BIOMASS_TL2) %>% 
+#   filter(YEAR >= 1999)
+# 
+# # remove BIOMASS_TL2 from inds so it is not used in the imputation (consistent with esswss)
+# inds <- inds %>% dplyr::select(-BIOMASS_TL2)
 
 # record which indicators have >25% NA for given area
 # these indicators will be filtered out after the imputation
@@ -806,8 +814,10 @@ FP_inverts <- fishingPressure(RV, land, FP.groups = FP.groups.inverts, species.t
                               years = c(1999:end_year))
 
 short_inds <- full_join(inverts, invert_demersal_ratio, by = c("YEAR", "ID")) %>% 
-  full_join(FP_inverts, by = c("YEAR", "ID")) %>% 
-  full_join(BIOMASS_TL2, by = c("YEAR", "ID"))
+  full_join(FP_inverts, by = c("YEAR", "ID"))
+
+# %>% 
+#   full_join(BIOMASS_TL2, by = c("YEAR", "ID"))
 
 # remove 2018 from ESS data because survey was not completed that year
 # short_inds.ess <- short_inds %>% filter(ID != "4X", YEAR != 2018)
@@ -821,12 +831,301 @@ NA_index_short <- get_NA_index(short_inds)
 
 # Export -----------------------------------------------------------------
 
-allIndicators <- full_join(inds_filtered, short_inds, by = c("YEAR", "ID")) 
+allIndicators <- left_join(inds_filtered, short_inds, by = c("YEAR", "ID")) 
 
 write.csv(allIndicators, file = paste(export.filepath, "/eco_indicators_", area, ".csv", sep = ""),
           row.names = FALSE)
 
 
 ```
-                          
+## calculate SS indicators
+ 
+```{r}
+path <- file.path(here())
+
+source(paste(path, "/Extra Info/get_NA_index_add_NAs.R", sep = ""))
+
+dir.create(paste(path, "/INDICATORS", sep = ""), recursive = FALSE, showWarnings = FALSE)
+export.filepath <- file.path(paste(path, "/INDICATORS", sep  = ""))
+
+start_year <- 1970
+end_year <- 2022
+ind.years <- c(start_year:end_year)
+
+# Extra data
+species.groups <-  read.csv(paste(path, "/Extra Info/SpeciesGroups.csv", sep = ""), header = TRUE, sep = ",")
+species.info <-  read.csv(paste(path, "/Extra Info/SpeciesInfo.csv", sep = ""), header = TRUE, sep = ",")
+
+# Group names
+ratio.groups <- data.frame(rbind(c("PELAGIC", "GROUNDFISH"), c("PREDATORS", "ALL")))
+names(ratio.groups) <- c("group1", "group2")
+
+trophicguild.groups <- c("LBENTHIVORE", "MBENTHIVORE", "PISCIVORE", "PLANKTIVORE", "ZOOPISCIVORE")
+
+condition.groups <- c("FINFISH", "LBENTHIVORE", "MBENTHIVORE", "PISCIVORE", "PLANKTIVORE", "ZOOPISCIVORE")
+
+# resource potential
+resource.groups <- c("ALL", "CLUPEIDS", "FINFISH", "FLATFISH", "FORAGE", 
+                     "GADOIDS", "GROUNDFISH", "PELAGIC", "SKATES")
+
+# allIndicators
+minTL <- c(0, 3.25)
+landings.groups <- c("ALL", "CLUPEIDS.L", "FINFISH.L", "FLATFISH.L", "FORAGE.L",
+                     "GADOIDS.L", "GROUNDFISH.L", "INVERTEBRATES.L","LARGE_PELAGIC.L",  "SKATES.L")
+FP.groups <- data.frame(rbind(c("ALL", "ALL"), 
+                              c("CLUPEIDS", "CLUPEIDS.L"),
+                              c("FINFISH", "FINFISH.L"),
+                              c("FLATFISH", "FLATFISH.L"),
+                              c("FORAGE", "FORAGE.L"),
+                              c("GADOIDS", "GADOIDS.L"),
+                              c("GROUNDFISH", "GROUNDFISH.L"),
+                              c("SKATES", "SKATES.L")))
+names(FP.groups) <- c("group.X", "group.land")
+
+# NAFO Data ------------------------------------------------------------------
+
+area <- "esswss"
+
+# fishery-independent data
+RV <- read.csv(paste(path, "/final_output/esswss_notlengthbased_qadj_final.csv", sep = ""), 
+               head = TRUE, sep = ",", stringsAsFactors = FALSE)
+RV_length <- read.csv(paste(path, "/final_output/esswss_lengthbased_qadj_final.csv", sep = ""), 
+                      head = TRUE, sep = ",", stringsAsFactors = FALSE)
+
+# commercial landings data
+# landings converted from tonnes to kg to be on the same scale as the RV data (required for the FP indicators)
+land <- read.csv(paste(path, "/output/Landings/esswss_land.csv", sep = ""), 
+                 head = TRUE, sep = ",", stringsAsFactors = FALSE) %>% 
+  mutate(CATCH = CATCH * 1000)
+
+Length_Weight <- read.csv(paste(path, "/final_output/esswss_LengthWeight.csv", sep = ""),
+                          header = TRUE, sep = ",",
+                          stringsAsFactors = FALSE) # read in length-at-weight data for ESS and WSS
+
+
+#  Most indicators --------------------------------------------------------
+
+# inds <- extractAll(X = RV, 
+#                    X_length = RV_length, 
+#                    land = land, 
+#                    years = ind.years,
+#                    speciesinfo.table = species.info,
+#                    species.table = species.groups,
+#                    metric.bio = "ABUNDANCE", 
+#                    group.bio = c("ALL", "GROUNDFISH"), 
+#                    minTL.bio = 3,
+#                    LSI.group = "ALL", 
+#                    max.length = 85, 
+#                   LFI.group = "ALL", 
+#                    large.fish = 35,
+#                             LenWt.table = Length_Weight,
+#                             condition.groups = condition.groups, 
+#                             guild.groups = trophicguild.groups,
+#                             ratio.groups = ratio.groups,
+#                             maxlength.group = "FINFISH",  
+#                             TL.grouping = 1, 
+#                             wind = 5, 
+#                             negative = FALSE,
+#                             resource.groups = resource.groups,
+#                             minTL.FiB = 0, 
+#                             base.start = 1968, 
+#                             base.end = 1970, 
+#                             TE = 0.1,
+#                             landings.groups = landings.groups, 
+#                             FP.groups = FP.groups, 
+#                             minTL.FP = c(0, 3.25),
+#                             glob.env = TRUE,
+#                             raw = TRUE, 
+#                             std = FALSE, export.path = NULL, export.id = area)
+
+# remove 2018 from ESS data because survey was not completed that year
+# inds.ess <- inds %>% filter(ID != "4X", YEAR != 2018)
+# inds.wss <- inds %>% filter(ID == "4X")
+# inds <- rbind(inds.ess, inds.wss)
+
+
+#the extractAll produces error 
+#Biodiversity, Structure and Functioning, Stability and Resistance, Resource Potential, and Fishing Pressure
+
+# allBiodiversity
+inds_biodiv<-allBiodiversity(X=RV,
+                             metric="ABUNDANCE", 
+                             groups="ALL",
+                             percentiles= c(0.25, 0.75),
+                             minTL=0, 
+                             TL.table=NULL,
+                             year=ind.years,
+                             raw=TRUE,
+                             std=TRUE,
+                             glob.env=TRUE
+                             )
+
+
+inds_struct<-allStructure( X=RV,
+  X_length=RV_length,
+  LSI.group="ALL",
+  LFI.group="ALL",
+  max.length = 85,
+  large.fish = 35,
+  guild.groups=trophicguild.groups,
+  condition.groups=condition.groups,
+  ratio.groups=ratio.groups,
+  species.table=species.groups,
+  speciesinfo.table=species.table,
+  LenWt.table=Length_Weight,
+  years=ind.years,
+  raw = TRUE,
+  std = TRUE,
+  glob.env = TRUE,
+  export.path = NULL,
+  export.id = NULL
+)
+
+inds_stab<-allStability(X=RV,
+  land=land,
+  maxlength.group = "FINFISH",
+  species.table = species.groups,
+  speciesinfo.table = species.info,
+  TL.grouping = 1,
+  wind = 5,
+  negative = FALSE,
+  years=ind.years,
+  raw = TRUE,
+  std = TRUE,
+  glob.env = TRUE,
+  export.path = NULL,
+  export.id = NULL
+)
+
+inds_press<-allPressure( X=RV,
+  land=land,
+  species.table = species.groups,
+  speciesinfo.table = species.info,
+  landings.groups = landings.groups,
+  FP.groups = FP.groups,
+  minTL = c(0, 3.25),
+  years=ind.years,
+  raw = TRUE,
+  std = TRUE,
+  glob.env = TRUE,
+  export.path = NULL,
+  export.id = NULL
+)
+
+inds_pote<-allPotential(X=RV,
+  land = land,
+  species.table = species.groups,
+  speciesinfo.table= species.info,
+  resource.groups = resource.groups,
+  minTL = 0,
+  TE = 0.1,
+  base.start= 1968,
+  base.end = 1970,
+  years = ind.years,
+  raw = TRUE,
+  std = TRUE,
+  glob.env = TRUE,
+  export.path = NULL,
+  export.id = NULL
+  )
+
+#Need to join tables here****
+inds<-inds_biodiv %>%
+  left_join(inds_pote, by = c("ID", "YEAR")) %>%
+  left_join(inds_press, by =c("ID", "YEAR")) %>%
+  left_join(inds_stab, by = c("ID", "YEAR")) %>%
+  left_join(inds_struct, by =c("ID", "YEAR")) 
+
+# save YEAR and ID to add into inds_imp dataframe
+YEAR <- inds$YEAR
+ID <- inds$ID
+
+##something weird here no Biomass_TL2 in dataframe.
+# BIOMASS_TL2 because only using values after 1998 (added back in to allIndicators below)
+# BIOMASS_TL2 <- inds %>% 
+#   dplyr::select(YEAR, ID, BIOMASS_TL2) %>% 
+#   filter(YEAR >= 1999)
+# 
+# # remove BIOMASS_TL2 from inds so it is not used in the imputation (consistent with esswss)
+# inds <- inds %>% dplyr::select(-BIOMASS_TL2)
+
+# record which indicators have >25% NA for given area
+# these indicators will be filtered out after the imputation
+NA_index <- get_NA_index(inds)
+NA_index_output <- pivot_wider(NA_index, names_from = col_index, values_from = fraction_NA)
+names(NA_index_output)[1] = "NAFO_Area"
+write.csv(NA_index_output, file = paste(export.filepath, "/fraction_NA_", area, ".csv", sep = ""),
+          row.names = FALSE)
+
+# imputation to fill in missing values
+set.seed(22)
+inds_imp <- inds %>% 
+  dplyr::select(-YEAR, -ID) %>% 
+  as.matrix() %>% 
+  missForest()
+
+inds_imp <- inds_imp$ximp %>% 
+  data.frame() %>% 
+  mutate(YEAR = YEAR, ID = ID) %>% 
+  dplyr::select(YEAR, ID, everything())
+
+# filter out indicators with >25% NA for a given area
+# this function uses the NA_index dataframe to find indicators for each strata that
+## had >25% NAs before imputation. All values for these indicators are replaced with
+## NA, essentially filtering out these indicators
+inds_filtered <- add_NAs(inds_imp, NA_index)
+rm(inds, inds_imp)
+
+
+# Invertebrate indicators -------------------------------------------------
+
+# the above calculates everything EXCEPT invertebrate-related indicators 
+## (because we want to start the invertebrate indicators in 1999)
+
+# invertebrate biomass
+inverts <- resourcePotential(RV, groups = "INVERTEBRATES", species.table = species.groups, 
+                             metric = "BIOMASS", years = c(1999:end_year))
+
+# invertebrate to demersal ratio
+invert_dem <- data.frame(rbind(c("INVERTEBRATES", "GROUNDFISH")))
+names(invert_dem) <- c("group1", "group2")
+invert_demersal_ratio <- biomassRatio(RV, ratio.groups = invert_dem, 
+                                      species.table = species.groups, 
+                                      metric = "BIOMASS", years = c(1999:end_year))
+
+# fishing pressure on inverts
+FP.groups.inverts <- data.frame(rbind(c("INVERTEBRATES", "INVERTEBRATES.L")))
+names(FP.groups.inverts) <- c("group.X", "group.land")
+FP_inverts <- fishingPressure(RV, land, FP.groups = FP.groups.inverts, species.table = species.groups,
+                              years = c(1999:end_year))
+
+short_inds <- full_join(inverts, invert_demersal_ratio, by = c("YEAR", "ID")) %>% 
+  full_join(FP_inverts, by = c("YEAR", "ID"))
+
+# %>% 
+#   full_join(BIOMASS_TL2, by = c("YEAR", "ID"))
+
+# remove 2018 from ESS data because survey was not completed that year
+# short_inds.ess <- short_inds %>% filter(ID != "4X", YEAR != 2018)
+# short_inds.wss <- short_inds %>% filter(ID == "4X")
+# short_inds <- rbind(short_inds.ess, short_inds.wss)
+# rm(short_inds.ess, short_inds.wss)
+
+# record which indicators have >25% NA for given strata
+# these indicators will be filtered out after the imputation
+NA_index_short <- get_NA_index(short_inds)
+
+# Export -----------------------------------------------------------------
+
+# allIndicators <- left_join(inds_filtered, short_inds, by = c("YEAR", "ID")) 
+
+allIndicators <- left_join(inds, short_inds, by = c("YEAR", "ID")) 
+
+write.csv(allIndicators, file = paste(export.filepath, "/eco_indicators_", area, ".csv", sep = ""),
+          row.names = FALSE)
+
+save(allIndicators, file=paste(export.filepath, "/eco_indicators_", area, ".Rdata", sep = ""))
+
+
+```
                           
