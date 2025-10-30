@@ -5,38 +5,248 @@ date: "2024-04-30"
 output: html_document
 ---
 
-This document consolidates the steps from SSdata to marinidicators for caluclating ecological indicators from the Maritimes Region.
+This document consolidates the steps from SSdata to marinidicators for calculating ecological indicators from the Maritimes Region.
 
 
 ```{r}
+
 #setup
-library(devtools)
-#setup
-library(devtools)
-#library(SSdata)
-library(here)
-library(tidyverse)
-library(readxl)
+require(devtools)
+#require(SSdata)
+require(RODBC)
+require(here)
+require(tidyverse)
+require(Rtools)
+require(readxl)
+require(remotes)
 install_github("dempseydanielle/marindicators")
-library(missForest)
-install_github("jamiectam/SSdata")
+require(missForest)
+# remotes::install_github("jamiectam/SSdata@<c386abc3887f012cec087db5d00d06a4ff264baa>")
+remotes::install_github("dempseydanielle/SSdata")
 
 ```
 
 Setup parameters
 ```{r}
 path<-file.path(here())
-start.year <- 2022 #recommend just updating one or 2 years to save time
-end.year <- 2022
+start.year <- 2023 #recommend just updating one or 2 years to save time
+end.year <- 2025
 areas.RV <- c("esswss", "shelf", "nafo", "strat")
 areas.land <- c("esswss", "shelf", "nafo")
 
 ```
 
 
-This starts after running SSdata::biomassData()
-                          SSdata::extractLAND()
-which requires username and password for accessing databases   
+which requires username and password for accessing database
+channel= odbcConnect("ptran", uid = "###", pwd = "###")
+
+# Replace biomassData function 
+```{r}
+biomassData <- function(path, s.strat = 440, e.strat = 495, s.year, e.year,
+                        vessel.correction = TRUE) {
+  
+  # display error message if s.strat or e.start are < 440 or > 495
+  if(s.strat < 440 | s.strat > 495 | e.strat < 440 | e.strat > 495) {
+    stop("error: s.strat or e.strat is outside of the Scotian Shelf")
+  }
+  
+  # vector of years of interest
+  yr <- s.year:e.year
+  
+  # start loop over years
+  for(i in 1:length(yr)) {            
+    
+    # At Length ---------------------------------------------------------------
+    
+    # Table with "SPECIES", "FUNGROUP", "Q", "LENCORR" (88 observations)
+    catch_coefs <- sqlQuery(channel, paste('select * from gomezc.indiseas_catchability_coeffs'))
+    # replaced sql database query with the file in the data folder
+    # catch_coefs<-INDISEAS_CATCHABILITY_COEFFS #####didn't work, try again later
+    catch_coefs[catch_coefs == 'NULL'] <- NA
+    outputs <- list()
+    m = 0
+    
+    # Extract table with 12 columns: 
+    ## YEAR, STRAT, MISSION, YYDDMMSS, XDDMMSS, SETNO, FLEN, 
+    ## ABUNDANCE, QABUNDANCE, QBIOMASS, BIOMASS, SPECIES
+    # QABUNDANCE and QBIOMASS are q-adjusted at the set level (BEFORE stratification). 
+    for (j in 1:nrow(catch_coefs)) {
+      outputs[[j]] <- qBiomass(species = catch_coefs[j, 1], fun_group = catch_coefs[j, 2], 
+                               q = catch_coefs[j, 3], len_corr = catch_coefs[j, 4], year = yr[i]) 
+    }
+    out <- as.data.frame(do.call(rbind, outputs))
+    out <- out[, -which(names(out) %in% c('YDDMMSS', 'XDDMMSS'))]  # remove lat/long columns
+    
+    if(vessel.correction) out <- vesselCorr(out)                   # apply vessel correction
+    
+    # Export length based data (biomass and abundance at 1 cm intervals)
+    fna <- paste(path,"/data/length/",sep="")
+    dir.create(fna, recursive = T, showWarnings = F)
+    fna <- paste(fna, "num_biom_at_length", yr[i], ".RData", sep = "")
+    save(out, file = fna, compress = T)
+    
+    # End of At Length ------------------------------------------------------
+    
+    # Begin aggregate ---------------------------------------------------------
+    # Sum over length (aggregated biomass & abundance of species that have length-based q)
+    ag.out <- aggregate(cbind(QBIOMASS, BIOMASS, QABUNDANCE, ABUNDANCE) ~ 
+                          YEAR + STRAT + MISSION + SETNO + SPECIES, 
+                        data = out, FUN = sum)
+    
+    # Extract table with 7 columns:
+    ## MISSION, SETNO, STRAT, YEAR, SPEC, ABUNDANCE, BIOMASS
+    dat <- sqlQuery(channel,paste("select distinct i.mission,i.setno,i.strat, to_char(sdate,'yyyy') year, spec,sum(nvl(totno,0)*1.75/i.dist) Abundance,sum(nvl(totwgt,0)*1.75/i.dist) biomass from 
+                            groundfish.gsinf i, groundfish.gscat c, gomezc.nafo_strat sg where i.mission=c.mission and i.setno=c.setno and i.strat=sg.strat and to_char(sdate,'mm') in ('06','07','08') and
+                            i.strat between '",s.strat,"' and '",e.strat,"' and type=1 and spec<9000 and to_char(sdate,'yyyy')=",yr[i],"
+                            group by i.mission,i.setno,i.strat,slat , slong ,to_char(sdate,'yyyy'), spec;",sep=""))
+    
+    # Fix high biomass estimate(s) for dogfish
+    dat[dat$BIOMASS > 8000 & dat$SPEC != 220,'BIOMASS'] <- 0 # added in November 08, 2013 
+    
+    # Change NA for abundance or biomass based on mean size of animals captured (for invs only)
+    dat[is.na(dat$ABUNDANCE), 'ABUNDANCE'] <- 0
+    dat[is.na(dat$BIOMASS), 'BIOMASS'] <- 0
+    
+    # Handle the missing biomass or abudance data where the other is present
+    # by using mean weight = biomass/abundance
+    if(any(dat$ABUNDANCE == 0 | dat$BIOMASS==0)) {
+      
+      wt <- sqlQuery(channel, paste("select * from mean_wts_for_fill_in;",sep="")) # table of mean fish weight ("SPEC" and "MEAN_WT_FISH", 640 observations)
+      dat <- merge(dat, wt, by = c('SPEC'), all.x = T)                             # merge dat and wt
+      dat[is.na(dat$MEAN_WT_FISH), 'MEAN_WT_FISH'] <- 0.5                          # if mean fish weight is NA, assign mean weight of 0.5
+      
+      if(any(dat$ABUNDANCE == 0)) {
+        dat$ABUNDANCE[dat$ABUNDANCE == 0] <- dat$BIOMASS[dat$ABUNDANCE==0]/dat$MEAN_WT_FISH[dat$ABUNDANCE==0] # abundance = biomass/mean weight  			
+      } # DD added this bracket so that biomass correction is OUTSIDE of the if statement for abundance
+      if(any(dat$BIOMASS == 0)) {
+        dat$BIOMASS[dat$BIOMASS == 0] <- dat$ABUNDANCE[dat$BIOMASS==0]*dat$MEAN_WT_FISH[dat$BIOMASS==0]					
+      }
+    }
+    
+    # Change ABUNDANCE = inf to ABUNDANCE = 1 
+    if(unique(dat$YEAR)==2012 & any(!is.finite(dat$ABUNDANCE))) dat[which(!is.finite(dat$ABUNDANCE)),'ABUNDANCE'] <- 1
+    
+    # If any biomass or abundance is still NA, stop code
+    if(any(is.na(dat[,c('BIOMASS','ABUNDANCE')]))) browser()
+    
+    # Replace 0's with small values
+    dat[dat$BIOMASS == 0 ,'BIOMASS'] <- 0.01	
+    dat[dat$ABUNDANCE == 0 ,'ABUNDANCE'] <- 1
+    
+    dat$QABUNDANCE <- dat$ABUNDANCE 
+    dat$QBIOMASS <- dat$BIOMASS
+    dat$SPECIES <- dat$SPEC       # need this line? Drop SPECIES column at line 145
+    if(vessel.correction) dat <- vesselCorr(dat) # Apply vessel correction
+    dat <- dat[, -which(names(dat) == 'SPECIES')]
+    
+    # Add in zero sets. 
+    # These are needed to calculate the stratified means
+    extra.sets <- sqlQuery(channel,paste("select distinct i.mission,i.setno,i.strat,to_char(sdate,'yyyy') year from groundfish.gsinf i, nafo_strat sg where 
+			i.strat=sg.strat and to_char(sdate,'yyyy') =",yr[i]," and to_char(sdate,'mm') in ('06','07','08') and i.strat between '",s.strat,"' and '",e.strat,"' and type=1;",sep=""))
+    s <- unique(dat$SPEC)	
+    m <- matrix(0, nrow = dim(extra.sets)[1], ncol=length(s),
+                dimnames = list(c(1:nrow(extra.sets)), s))	
+    m <- cbind(extra.sets, m)
+    h <- melt(m, id = c("MISSION", "SETNO", "STRAT", "YEAR"))
+    names(h)[which(names(h) %in% c('variable','value'))] <- c('SPECIES','BIOMASS')
+    h$QBIOMASS <- h$QABUNDANCE <- h$MEAN_WT_FISH <- h$ABUNDANCE <- 0
+    names(dat)[1] <- 'SPECIES'
+    
+    l <- rbind(dat, h, all = T) # not sure why need all = T. This adds an extra
+    # row where MISSION = TRUE and SPECIES = TRUE (other columns = 1).
+    # I remove this row below
+    
+    dat <- l[!duplicated(l[,c('MISSION','SETNO','SPECIES')], fromLast = F),]
+    dat <- dat[-which(dat$MISSION == TRUE), ] # remove row where MISSION == TRUE
+    
+    # Add in the qadjusted data
+    dat1 <- dat
+    w <- merge(dat, ag.out, by = c('MISSION','SETNO','STRAT','SPECIES','YEAR'), all.x = T)	
+    # Add columns for ABUNDANCE, QABUNDANCE, BIOMASS, and QBIOMASS
+    w$ABUNDANCE <- 0		
+    w$QABUNDANCE <- 0		
+    w$BIOMASS <- 0		
+    w$QBIOMASS <- 0		
+    
+    # Fill in columns for ABUNDANCE, QABUNDANCE, BIOMASS, and QBIOMASS with appropriate data
+    # .x is from dat (not q adj); .y is from ag.out (qadj)
+    w$ABUNDANCE <- ifelse(is.na(w$ABUNDANCE.y), w$ABUNDANCE.x, w$ABUNDANCE.y)
+    w$BIOMASS <- ifelse(is.na(w$BIOMASS.y), w$BIOMASS.x, w$BIOMASS.y)
+    w$QABUNDANCE <- ifelse(is.na(w$QABUNDANCE.y), w$QABUNDANCE.x, w$QABUNDANCE.y)
+    w$QBIOMASS <- ifelse(is.na(w$QBIOMASS.y), w$QBIOMASS.x, w$QBIOMASS.y)
+    
+    # Export aggregated data
+    dat <- w[, c('MISSION','SETNO','SPECIES','YEAR','STRAT','ABUNDANCE','BIOMASS','QABUNDANCE','QBIOMASS')]		
+    fna <- paste(path,"/data/aggregate/",sep="")
+    dir.create(fna, recursive = T, showWarnings = F)
+    save(dat, file = paste(fna, "num_biom", yr[i], ".RData", sep=""))
+    
+    rm(dat, w)
+    
+    print(paste("biomassData() function: finished year", yr[i]))
+  } # end of loop over years
+  
+} # end of function
+
+vesselCorr <- function(x) {
+  
+  cf = NULL
+  x$CFVESSEL = 1  # initialise
+  
+  # vessel change correction factors apply to these years:
+  HAM=1   #  Lady Hammond (1979 - 1981)
+  ATC=2   #  A.T. Cameron (1982 - 1983)
+  
+  # species codes used by the database
+  cod=10
+  haddock=11
+  whitehake=12
+  silverhake=14
+  plaicelarge=40
+  plaicesmall=40
+  witch=41
+  yellowtail=42
+  winterflounder=43
+  cf$cod[HAM]         = 0.8
+  cf$haddock[HAM]     = 1.0
+  cf$whitehake[HAM]   = 1.0
+  cf$silverhake[HAM]  = 1.0
+  cf$plaicesmall[HAM] = 1   # <=28cm
+  cf$plaicelarge[HAM] = 1   # > 28cm
+  cf$witch[HAM]       = 0.8
+  cf$yellowtail[HAM]  = 0.8
+  cf$winterflounder[HAM] = 1.0
+  cf$cod[ATC]         = 0.8
+  cf$haddock[ATC]     = 1.2
+  cf$whitehake[ATC]   = 1.0
+  cf$silverhake[ATC]  = 1.0
+  cf$plaicesmall[ATC] = 0.7
+  cf$plaicelarge[ATC] = 1.0
+  cf$witch[ATC]       = 0.8
+  cf$yellowtail[ATC]  = 0.8
+  cf$winterflounder[ATC] = 1.0
+  attach (x)
+  x$CFVESSEL[ which( (substring(MISSION,1,3)=="HAM" & SPECIES==cod)) ] = cf$cod[HAM]
+  x$CFVESSEL[ which((substring(MISSION,1,3)=="HAM" & SPECIES==witch)) ] = cf$witch[HAM]
+  x$CFVESSEL[ which((substring(MISSION,1,3)=="HAM" & SPECIES==yellowtail)) ] = cf$yellowtail[HAM]
+  x$CFVESSEL[ which((substring(MISSION,1,3)=="ATC" & SPECIES==cod)) ] = cf$cod[ATC]
+  x$CFVESSEL[ which((substring(MISSION,1,3)=="ATC" & SPECIES==haddock)) ] = cf$haddock[ATC]
+  x$CFVESSEL[ which((substring(MISSION,1,3)=="ATC" & SPECIES==plaicesmall && FLEN<=28)) ] = cf$plaicesmall[ATC]
+  x$CFVESSEL[ which((substring(MISSION,1,3)=="ATC" & SPECIES==witch)) ] = cf$witch[ATC]
+  x$CFVESSEL[ which((substring(MISSION,1,3)=="ATC" & SPECIES==yellowtail)) ] = cf$yellowtail[ATC]
+  detach (x)
+  x$BIOMASS = x$BIOMASS * x$CFVESSEL #similar coefficients in manning 1985      
+  x$ABUNDANCE = x$ABUNDANCE * x$CFVESSEL
+  if(any(names(x) %in% c('QBIOMASS','QABUNDANCE'))) {
+    x$QBIOMASS = x$QBIOMASS * x$CFVESSEL #similar coefficients in manning 1985      
+    x$QABUNDANCE = x$QABUNDANCE * x$CFVESSEL
+  }
+  x <- x[,-which(names(x)=='CFVESSEL')]
+  return (x)
+}
+
+
+```
 
 
 ## Update biomass and landings data
@@ -120,10 +330,11 @@ length.cutoff <- 23
 # IMPORT DATA -------------------------------------------------------------
 
 # adjusted-VPA biomass index 
+# Replaced VPA biomass index with SSB model output from a Statistical catch at age model from the MSE from Allan Debertin. Added column SSB_tonnes
 adj_dat <- read.csv(paste(path, "/output/RV/herring_data/herring_biomass_adjusted.csv", sep = "")) 
 adj_VPA <- adj_dat %>% 
-  filter(YEAR >= 1970, YEAR < 1999) %>%  # filter for years >= 1970 & years < 1999
-  mutate(BIOMASS = BIOMASS * 1000) %>%   # convert from tonnes to kg
+  filter(YEAR >= 1970, YEAR < 2021) %>%  # filter for years >= 1970 & years < 1999 CHANGED to 2020 to align with SSB data
+  mutate(BIOMASS = SSB_tonnes * 1000) %>%   # convert from tonnes to kg
   rename("BIOMASS_INDEX" = "BIOMASS")    # rename biomass column to differentiate from RV BIOMASS
 
 # acoustic abundance at length: numbers (millions) at length (cm)
@@ -157,7 +368,7 @@ RV_wss <- read.csv(paste(path, "/output/RV/esswss/esswss_lengthbased_notqadj.csv
   filter(SPECIES == 60,                # subset for herring
          ID == "WSS",                  # subset for WSS
          YEAR >= 1970, 
-         YEAR < 1999) %>%              # subset for years < 1999 (acoustic data used after 1999)
+         YEAR < 2021) %>%              # subset for years < 1999 (acoustic data used after 1999)
   convert_herring_length() %>%         # convert all lengths to total length in cm
   select(-ID, -SPECIES) %>%
   filter(LENGTH >= length.cutoff)      # subset for lengths >= 23 cm (mature fish)
@@ -183,15 +394,19 @@ adj_agg <- full_join(adj_VPA, MEAN_WT, by = "YEAR") %>%
 
 rm(MEAN_WT)
 
+######
+#DON'T USE BELOW after sub for SSB data from MSE outputs instead of acoustic
+########
+
 ### After 1999
 
-# Sum biomass and abundance over all length classes each year
-acoustic_agg <- acoustic %>%  
-  group_by(YEAR) %>% 
-  summarize(BIOMASS = sum(BIOMASS), ABUNDANCE = sum(ABUNDANCE))
-
-# Total biomass and abundance indices for WSS:
-HER_agg_wss <- rbind(adj_agg, acoustic_agg)
+# # Sum biomass and abundance over all length classes each year
+# acoustic_agg <- acoustic %>%  
+#   group_by(YEAR) %>% 
+#   summarize(BIOMASS = sum(BIOMASS), ABUNDANCE = sum(ABUNDANCE))
+# 
+# # Total biomass and abundance indices for WSS:
+# HER_agg_wss <- rbind(adj_agg, acoustic_agg)
 
 ###############
 ## Length #####
@@ -225,8 +440,9 @@ rm(MEAN_WT_length)
   
 # Acoustic data
 
-# Biomass and abundance indices at length for WSS:
-HER_length_wss <- rbind(adj_length, acoustic)
+# # Biomass and abundance indices at length for WSS:
+# HER_length_wss <- rbind(adj_length, acoustic)
+HER_length_wss<-adj_length
 
 ###########################################################################
 # Strata Scale ------------------------------------------------------------
@@ -288,8 +504,9 @@ acoustic_agg_strat <- acoustic %>%
   mutate(BIOMASS = BIOMASS * PROP_BIOMASS, ABUNDANCE = ABUNDANCE * PROP_ABUNDANCE) %>% 
   select(YEAR, ID, BIOMASS, ABUNDANCE)
 
-# Total biomass and abundance indices at for each strata on WSS:
-HER_agg_strat <- rbind(adj_agg_strat, acoustic_agg_strat)
+# # Total biomass and abundance indices at for each strata on WSS:
+# HER_agg_strat <- rbind(adj_agg_strat, acoustic_agg_strat)
+HER_agg_strat<-adj_agg_strat #use only data calculated from SSB model
 
 ###############
 ## Length #####
@@ -298,7 +515,8 @@ HER_agg_strat <- rbind(adj_agg_strat, acoustic_agg_strat)
 ### Before 1999:
   
 # Calculate proportion of RV biomass and abundance in each strata and length class
-RV_prop_length <- RV_strat %>% filter(YEAR < 1999) %>% 
+RV_prop_length <- RV_strat %>% 
+  # filter(YEAR < 1999) %>%
   group_by(YEAR) %>% 
   # total biomass & abundance over all strata & length classes
   mutate(TOTAL_BIOMASS = sum(BIOMASS), TOTAL_ABUNDANCE = sum(ABUNDANCE)) %>%                   
@@ -308,7 +526,8 @@ RV_prop_length <- RV_strat %>% filter(YEAR < 1999) %>%
   select(YEAR, ID, LENGTH, PROP_BIOMASS, PROP_ABUNDANCE)
 
 # Calculate mean weight (kg) at length (cm) from RV data 
-MEAN_WT_length <- RV_strat %>%  filter(YEAR < 1999) %>% 
+MEAN_WT_length <- RV_strat %>%  
+  # filter(YEAR < 1999) %>% 
   mutate(MEAN_WT = BIOMASS/ABUNDANCE) %>% 
   select(-BIOMASS, -ABUNDANCE)
 
@@ -342,8 +561,9 @@ acoustic_length <- acoustic %>%
   mutate(BIOMASS = BIOMASS * PROP_BIOMASS, ABUNDANCE = ABUNDANCE * PROP_ABUNDANCE) %>% 
   select(YEAR, ID, LENGTH, BIOMASS, ABUNDANCE)
 
-# Biomass and abundance indices at length for each strata on WSS:
-HER_length_strat <- rbind(adj_length, acoustic_length)
+# # Biomass and abundance indices at length for each strata on WSS:
+# HER_length_strat <- rbind(adj_length, acoustic_length)
+HER_length_strat<-adj_length
 
 
 
@@ -352,13 +572,13 @@ HER_length_strat <- rbind(adj_length, acoustic_length)
 dir.create(paste(path, "/output/RV/herring_output", sep = ""), recursive = FALSE, showWarnings = T)
 
 save(HER_agg_wss, 
-          file = paste(path, "/output/RV/herring_output/wss_notlengthbased_herring.Rdata", sep = ""))
+          file = paste(path, "/output/RV/herring_output/wss_notlengthbased_herring_SSB.Rdata", sep = ""))
 
 save(HER_length_wss, 
-          file = paste(path, "/output/RV/herring_output/wss_lengthbased_herring.Rdata", sep = ""))
+          file = paste(path, "/output/RV/herring_output/wss_lengthbased_herring_SSB.Rdata", sep = ""))
 
 save(HER_agg_strat, 
-          file = paste(path, "/output/RV/herring_output/strat_notlengthbased_herring.Rdata", sep = ""))
+          file = paste(path, "/output/RV/herring_output/strat_notlengthbased_herring_SSB.Rdata", sep = ""))
 
 save(HER_length_strat, 
           file = paste(path, "/output/RV/herring_output/strat_lengthbased_herring.Rdata", sep = ""))
@@ -373,9 +593,12 @@ source(paste(path, "/Extra Info/convert_herring_length.R", sep = ""))
 
 #  WSS AGG ---------------------------------------------------------
 
-# herring index: add ID and SPECIES columns
-HER_wss_agg <- read_csv(paste(path, "/output/RV/herring_output/wss_notlengthbased_herring.csv", sep = "")) %>% 
-  mutate(ID = "WSS", SPECIES = 60)
+# # herring index: add ID and SPECIES columns
+# HER_wss_agg <- read_csv(paste(path, "/output/RV/herring_output/wss_notlengthbased_herring.csv", sep = "")) %>% 
+#   mutate(ID = "WSS", SPECIES = 60)
+#changed to use model SSB derived herring 
+HER_wss_agg<-HER_agg_wss |> 
+    mutate(ID = "WSS", SPECIES = 60)
 
 # RV data
 esswss_agg <- read_csv(paste(path, "/output/RV/esswss/esswss_notlengthbased_qadj.csv", sep = ""))
@@ -393,9 +616,12 @@ esswss_agg_OUT <- rbind(ess_agg, wss_agg)
 
 #  WSS LENGTH ---------------------------------------------------------
 
-# herring index: add ID and SPECIES columns
-HER_wss_length <- read_csv(paste(path, "/output/RV/herring_output/wss_lengthbased_herring.csv", sep = ""))  %>% 
-  mutate(ID = "WSS", SPECIES = 60)
+# # herring index: add ID and SPECIES columns
+# HER_wss_length <- read_csv(paste(path, "/output/RV/herring_output/wss_lengthbased_herring.csv", sep = ""))  %>% 
+#   mutate(ID = "WSS", SPECIES = 60)
+#changed to use model SSB derived herring 
+HER_wss_length<-HER_length_wss |> 
+    mutate(ID = "WSS", SPECIES = 60)
 
 # RV data
 esswss_length <-  read_csv(paste(path, "/output/RV/esswss/esswss_lengthbased_qadj.csv", sep = ""))
@@ -414,9 +640,11 @@ esswss_length_OUT <- rbind(ess_length, wss_length)
 
 #  NAFO AGG ---------------------------------------------------------
 
-# herring index: 4X is the same as WSS
-HER_4X_agg <- read_csv(paste(path, "/output/RV/herring_output/wss_notlengthbased_herring.csv", sep = "")) %>% 
-  mutate(ID = "4X", SPECIES = 60)
+# # herring index: 4X is the same as WSS
+# HER_4X_agg <- read_csv(paste(path, "/output/RV/herring_output/wss_notlengthbased_herring.csv", sep = "")) %>% 
+#   mutate(ID = "4X", SPECIES = 60)
+HER_4X_agg<-HER_agg_wss |> 
+    mutate(ID = "4X", SPECIES = 60)
 
 # RV data
 nafo_agg <- read_csv(paste(path, "/output/RV/nafo/nafo_notlengthbased_qadj.csv", sep = ""))
@@ -434,9 +662,11 @@ nafo_agg_OUT <- rbind(VW_agg, X_agg)
 
 #  NAFO LENGTH ---------------------------------------------------------
 
-# herring index: add ID and SPECIES columns
-HER_4X_length <- read_csv(paste(path, "/output/RV/herring_output/wss_lengthbased_herring.csv", sep = ""))  %>% 
-  mutate(ID = "4X", SPECIES = 60)
+# # herring index: add ID and SPECIES columns
+# HER_4X_length <- read_csv(paste(path, "/output/RV/herring_output/wss_lengthbased_herring.csv", sep = ""))  %>% 
+#   mutate(ID = "4X", SPECIES = 60)
+HER_4X_length<-HER_length_wss |> 
+    mutate(ID = "4X", SPECIES = 60)
 
 # RV data
 nafo_length <-  read_csv(paste(path, "/output/RV/nafo/nafo_lengthbased_qadj.csv", sep = ""))
@@ -456,8 +686,11 @@ nafo_length_OUT <- rbind(VW_length, X_length)
 #  strat AGG ---------------------------------------------------------
 
 # herring index: add SPECIES columns
-HER_strat_agg <- read_csv(paste(path, "/output/RV/herring_output/strat_notlengthbased_herring.csv", sep = "")) %>% 
-  mutate(SPECIES = 60)
+# HER_strat_agg <- read_csv(paste(path, "/output/RV/herring_output/strat_notlengthbased_herring.csv", sep = "")) %>% 
+#   mutate(SPECIES = 60)
+
+HER_strat_agg<-HER_agg_strat |> 
+    mutate(SPECIES = 60)
 
 # RV data
 strat_agg <- read_csv(paste(path, "/output/RV/strat/strat_notlengthbased_qadj.csv", sep = ""))
@@ -475,9 +708,12 @@ strat_agg_OUT <- rbind(ess_strat_agg, wss_strat_agg)
 
 #  strat LENGTH ---------------------------------------------------------
 
-# herring index: add SPECIES columns
-HER_strat_length <- read_csv(paste(path, "/output/RV/herring_output/strat_lengthbased_herring.csv", sep = "")) %>% 
-  mutate(SPECIES = 60)
+# # herring index: add SPECIES columns
+# HER_strat_length <- read_csv(paste(path, "/output/RV/herring_output/strat_lengthbased_herring.csv", sep = "")) %>% 
+#   mutate(SPECIES = 60)
+
+HER_strat_length<-HER_length_strat |> 
+    mutate(SPECIES = 60)
 
 # RV data
 strat_length <- read_csv(paste(path, "/output/RV/strat/strat_lengthbased_qadj.csv", sep = ""))
@@ -619,38 +855,38 @@ Length_Weight <- read.csv(paste(path, "/final_output/nafo_LengthWeight.csv", sep
 
 #  Most indicators --------------------------------------------------------
 
-inds <- extractAll(X = RV, 
-                   X_length = RV_length, 
-                   land = land, 
-                   years = ind.years,
-                   speciesinfo.table = species.info,
-                   species.table = species.groups,
-                   metric.bio = "ABUNDANCE", 
-                   group.bio = c("ALL", "GROUNDFISH"), 
-                   minTL.bio = 3,
-                   LSI.group = "ALL", 
-                   max.length = 85, 
-                  LFI.group = "ALL", 
-                   large.fish = 35,
-                            LenWt.table = Length_Weight,
-                            condition.groups = condition.groups, 
-                            guild.groups = trophicguild.groups,
-                            ratio.groups = ratio.groups,
-                            maxlength.group = "FINFISH",  
-                            TL.grouping = 1, 
-                            wind = 5, 
-                            negative = FALSE,
-                            resource.groups = resource.groups,
-                            minTL.FiB = 0, 
-                            base.start = 1968, 
-                            base.end = 1970, 
-                            TE = 0.1,
-                            landings.groups = landings.groups, 
-                            FP.groups = FP.groups, 
-                            minTL.FP = c(0, 3.25),
-                            glob.env = TRUE,
-                            raw = TRUE, 
-                            std = FALSE, export.path = NULL, export.id = area)
+# inds <- extractAll(X = RV, 
+#                    X_length = RV_length, 
+#                    land = land, 
+#                    years = ind.years,
+#                    speciesinfo.table = species.info,
+#                    species.table = species.groups,
+#                    metric.bio = "ABUNDANCE", 
+#                    group.bio = c("ALL", "GROUNDFISH"), 
+#                    minTL.bio = 3,
+#                    LSI.group = "ALL", 
+#                    max.length = 85, 
+#                   LFI.group = "ALL", 
+#                    large.fish = 35,
+#                             LenWt.table = Length_Weight,
+#                             condition.groups = condition.groups, 
+#                             guild.groups = trophicguild.groups,
+#                             ratio.groups = ratio.groups,
+#                             maxlength.group = "FINFISH",  
+#                             TL.grouping = 1, 
+#                             wind = 5, 
+#                             negative = FALSE,
+#                             resource.groups = resource.groups,
+#                             minTL.FiB = 0, 
+#                             base.start = 1968, 
+#                             base.end = 1970, 
+#                             TE = 0.1,
+#                             landings.groups = landings.groups, 
+#                             FP.groups = FP.groups, 
+#                             minTL.FP = c(0, 3.25),
+#                             glob.env = TRUE,
+#                             raw = TRUE, 
+#                             std = FALSE, export.path = NULL, export.id = area)
 
 # remove 2018 from ESS data because survey was not completed that year
 # inds.ess <- inds %>% filter(ID != "4X", YEAR != 2018)
@@ -831,10 +1067,11 @@ NA_index_short <- get_NA_index(short_inds)
 
 # Export -----------------------------------------------------------------
 
-allIndicators <- left_join(inds_filtered, short_inds, by = c("YEAR", "ID")) 
+eco_indicators_nafo <- left_join(inds_filtered, short_inds, by = c("YEAR", "ID")) 
 
-write.csv(allIndicators, file = paste(export.filepath, "/eco_indicators_", area, ".csv", sep = ""),
+write.csv(eco_indicators_nafo, file = paste(export.filepath, "/eco_indicators_", area, ".csv", sep = ""),
           row.names = FALSE)
+save(eco_indicators_nafo, file=here("INDICATORS", "eco_indicators_nafo.Rdata"))
 
 
 ```
@@ -1119,12 +1356,12 @@ NA_index_short <- get_NA_index(short_inds)
 
 # allIndicators <- left_join(inds_filtered, short_inds, by = c("YEAR", "ID")) 
 
-allIndicators <- left_join(inds, short_inds, by = c("YEAR", "ID")) 
+eco_indicators_esswss <- left_join(inds, short_inds, by = c("YEAR", "ID")) 
 
-write.csv(allIndicators, file = paste(export.filepath, "/eco_indicators_", area, ".csv", sep = ""),
+write.csv(eco_indicators_esswss, file = paste(export.filepath, "/eco_indicators_", area, ".csv", sep = ""),
           row.names = FALSE)
 
-save(allIndicators, file=paste(export.filepath, "/eco_indicators_", area, ".Rdata", sep = ""))
+save(eco_indicators_esswss, file=paste(export.filepath, "/eco_indicators_", area, ".Rdata", sep = ""))
 
 
 ```

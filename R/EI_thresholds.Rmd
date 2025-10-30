@@ -1,0 +1,474 @@
+---
+title: "EI_thresholds"
+output: html_document
+---
+
+Getting old packages from previous R versions
+```{r}
+# Get a list of packages from the old R version
+old_lib <- "C:/Users/tamj/AppData/Local/R/win-library/4.4"  # adjust to your old R path
+old_packages <- installed.packages(lib.loc = old_lib)[, "Package"]
+
+# Reinstall them in the new R version
+install.packages(old_packages)
+
+
+install.packages("pak")
+pak::pkg_install(old_packages)
+
+```
+
+
+# setup
+```{r}
+#system setup
+require(tidyverse)
+require(azmpdata)
+require(marea)
+require(gratia)
+require(gradientForest)
+require(mgcv)
+```
+
+# gather indicators and pressures
+```{r}
+
+marea::eco_indicators
+
+#separate by region
+# indicators used in Irvine et al. 2025 reasoning was that they didn't use any indicators calculated that had landings (not available at set level), MargalefRichness_ALL, Heips_ALL, LargeFishIndicator, MeanLengthAbundance, Biomass_Piscivore, CCondition_Finfish, CCondition_MBenthivore, CCondition_Zoopiscivore, CCondition_Planktivores, CCondition_LBenthivore, CVBiomass, MeanLifespan, BiomassTL2, Biomass_Skates, Biomass_All, Biomass_Flatfish, Biomass_Gadoids, Biomass_invertebrates
+
+nafo_ei_4VN<-eco_indicators[eco_indicators@data$region=="4VN"]
+nafo_ei_4VS<-eco_indicators[eco_indicators@data$region=="4VS"]
+nafo_ei_4W<-eco_indicators[eco_indicators@data$region=="4W"]
+nafo_ei_4X<-eco_indicators[eco_indicators@data$region=="4X"]
+nafo_ind_4X<-nafo_ei_4X@data |> 
+    select(margalefrichness=MargalefRichness_ALL_value,
+           heips=Heips_ALL_value,
+           lfi=LargeFishIndicator_value,
+           mla=MeanLengthABUNDANCE_value,
+           biomasspiscivore=BIOMASS_PISCIVORE_value
+           )
+
+
+ESS_ei<-eco_indicators[eco_indicators@data$region=="ESS"]
+WSS_ei<-eco_indicators[eco_indicators@data$region=="WSS"]
+
+# pull environmental indicators and fishing from azmpdata?
+# nafo level, SST,Bottom Temp,bottom temperature anomalies, sst_anomalies,  Cal fin, zooplankton, Integrated chl, Nitrate (stations, lines?)
+nafo_bt_4VN<-azmp_bottom_temperature[azmp_bottom_temperature@data$region=="4VN"]
+nafo_bt_4VS<-azmp_bottom_temperature[azmp_bottom_temperature@data$region=="4VS"]
+nafo_bt_4W<-azmp_bottom_temperature[azmp_bottom_temperature@data$region=="4W"]
+nafo_bt_4X<-eco_indicators[eco_indicators@data$region=="4X"]
+nafo_pres_4X<-nafo_ei_4X@data |> 
+    select(landall=landings_ALL_value, 
+           landforage=landings_FORAGE.L_value,
+           fpall=FP_ALL_value,
+           fpgadoids=FP_GADOIDS_value #no spaces or underscores!
+           )
+
+nafo_sst_4X<-azmpdata::Derived_Annual_Broadscale |>
+        filter(area=="4XSS")|>
+        select(YEAR=year,SST=sea_surface_temperature_from_satellite)
+
+nafo_land_4X<-eco_indicators[eco_indicators@data$region=="4X"]
+  
+# Shelf level indicators, NAO_w, AMO, Bloom stats
+  ESS_bt<-marea::azmp_bottom_temperature[azmp_bottom_temperature@data$region=="ESS"]
+  WSS_bt<-marea::azmp_bottom_temperature[azmp_bottom_temperature@data$region=="WSS"]
+  nao<-marea::nao
+  amo<-marea::amo
+  
+
+```
+
+
+# Step 1.  run GAM and GLMs for each indicator x pressure combo
+```{r}
+library(mgcv)
+library(gratia)
+
+# Initialize model list
+model_list <- list()
+
+# Loop to fit and store both GAM and GLM models
+for (a_col in names(nafo_ind_4X)) {
+  for (b_col in names(nafo_pres_4X)) {
+    tryCatch({
+      df <- data.frame(
+        response = nafo_ind_4X[[a_col]],
+        predictor = nafo_pres_4X[[b_col]]
+      )
+      df <- na.omit(df)
+      
+      if (nrow(df) < 10 || var(df$predictor) == 0 || var(df$response) == 0) next
+      
+      # Fit GAM
+      gam_model <- gam(response ~ s(predictor), data = df, method = "REML",
+                       family = tw())
+      
+      # Fit GLM (linear predictor)
+      glm_model <- gam(response ~ predictor, data = df, method = "REML",
+                      family = tw())
+      
+      # Save both models
+      model_name <- paste(a_col, b_col, sep = "_vs_")
+      model_list[[paste0(model_name, "_GAM")]] <- gam_model
+      model_list[[paste0(model_name, "_GLM")]] <- glm_model
+      
+    }, error = function(e) {
+      message("Error fitting models for ", a_col, " vs ", b_col, ": ", e$message)
+    })
+  }
+}
+
+```
+
+# Step 2. Pull model results and create a data table of model results
+```{r}
+# Initialize comparison results data frame
+comparison_results <- data.frame()
+
+# Loop through model_list to extract diagnostics
+for (model_name in names(model_list)) {
+  tryCatch({
+    model <- model_list[[model_name]]
+    model_summary <- summary(model)
+    
+    # Determine model type and variable names
+    parts <- strsplit(model_name, "_vs_")[[1]]
+    response <- parts[1]
+    predictor_and_type <- parts[2]
+    
+    # Separate predictor and model type
+    predictor <- sub("_.*$", "", predictor_and_type)
+    model_type <- sub("^.*_", "", predictor_and_type)
+    
+    # Extract diagnostics
+    aic_val <- AIC(model)
+    r_squared <- model_summary$r.sq
+    edf <- if ("edf" %in% names(model_summary)) model_summary$edf[1] else NA
+    gcv_score <- model$gcv.ubre
+    
+    # Extract p-value depending on model type
+    p_value <- tryCatch({
+      if (model_type == "GAM") {
+        model_summary$s.table[1, "p-value"]
+      } else if (model_type == "GLM") {
+        model_summary$p.table["predictor", "Pr(>|t|)"]
+      } else {
+        NA
+      }
+    }, error = function(e) NA)
+    
+    # Store results
+    comparison_results <- rbind(comparison_results, data.frame(
+      Response = response,
+      Predictor = predictor,
+      Model_Type = model_type,
+      AIC = aic_val,
+      R_squared = r_squared,
+      EDF = edf,
+      GCV_UBRE = gcv_score,
+      p_value = p_value,
+      stringsAsFactors = FALSE
+    ))
+    
+  }, error = function(e) {
+    message("Error extracting diagnostics for ", model_name, ": ", e$message)
+  })
+}
+
+# View comparison table
+print(comparison_results)
+```
+
+# Model selection proceedure selecting lower GCV scores from the comparison_results table
+```{r}
+library(dplyr)
+
+# Compare GAM vs GLM for each Response-Predictor pair
+model_selection <- comparison_results %>%
+  group_by(Response, Predictor) %>%
+  filter(Model_Type %in% c("GAM", "GLM")) %>%
+  arrange(GCV_UBRE) %>%
+  slice(1)  # Select model with lowest GCV
+
+
+print(model_selection)
+
+```
+
+# create plots 
+```{r}
+library(gratia)
+library(ggplot2)
+library(patchwork)
+
+plot_list <- list()
+
+for (i in seq_len(nrow(model_selection))) {
+  row <- model_selection[i, ]
+  response <- row$Response
+  predictor <- row$Predictor
+  model_type <- row$Model_Type
+  
+  full_model_name <- paste0(response, "_vs_", predictor, "_", model_type)
+  model <- model_list[[full_model_name]]
+  
+  if (!is.null(model)) {
+    if (model_type == "GAM") {
+      # Use gratia::draw for GAMs
+      p <- draw(model) +
+        labs(
+          title = paste("GAM:", response, "vs", predictor),
+          x = predictor,
+          y = response
+        )
+    } 
+    
+    # use ggplot2 for GLMs
+  else if (model_type == "GLM") {
+    df <- model$model
+    df$fit <- fitted(model)
+    df$se <- sqrt(model$scale) * predict(model, type = "link", se.fit = TRUE)$se.fit
+  
+  # Compute confidence bounds (±1 SD)
+  df$upper <- df$fit + df$se
+  df$lower <- df$fit - df$se
+  
+  p <- ggplot(df, aes_string(x = "predictor", y = "response")) +
+    geom_point(alpha = 0.6) +
+    geom_line(aes(y = fit), color = "blue", linewidth = 1) +
+    geom_ribbon(aes(ymin = lower, ymax = upper), fill = "blue", alpha = 0.2) +
+    labs(
+      title = paste("GLM:", response, "vs", predictor),
+      x = predictor,
+      y = response
+    ) +
+    theme_minimal()
+}
+
+    
+    plot_list[[full_model_name]] <- p
+  }
+}
+
+# Combine and display plots
+combined_plot <- wrap_plots(plot_list, ncol = 4)
+print(combined_plot)
+
+```
+
+
+
+
+# Step 1.  run GAM and GLMs for each indicator x pressure combo
+```{r}
+
+library(mgcv)
+library(gratia)
+
+# Initialize model list
+model_list <- list()
+
+# Loop to fit and store both GAM and GLM models
+for (a_col in names(nafo_ind_4X)) {
+  for (b_col in names(nafo_pres_4X)) {
+    tryCatch({
+      df <- data.frame(
+        response = nafo_ind_4X[[a_col]],
+        predictor = nafo_pres_4X[[b_col]]
+      )
+      df <- na.omit(df)
+      
+      if (nrow(df) < 10 || var(df$predictor) == 0 || var(df$response) == 0) next
+      
+      # Fit GAM
+      gam_model <- gam(response ~ s(predictor), data = df, method = "REML",
+                       family = tw())
+      
+      # Fit GLM (linear predictor)
+      glm_model <- gam(response ~ predictor, data = df, method = "REML",
+                      family = tw())
+      
+      # Save both models
+      model_name <- paste(a_col, b_col, sep = "_vs_")
+      model_list[[paste0(model_name, "_GAM")]] <- gam_model
+      model_list[[paste0(model_name, "_GLM")]] <- glm_model
+      
+    }, error = function(e) {
+      message("Error fitting models for ", a_col, " vs ", b_col, ": ", e$message)
+    })
+  }
+}
+
+```
+
+# Step 2. Pull model results and create a data table of model results
+```{r}
+# Initialize comparison results data frame
+comparison_results <- data.frame()
+
+# Loop through model_list to extract diagnostics
+for (model_name in names(model_list)) {
+  tryCatch({
+    model <- model_list[[model_name]]
+    model_summary <- summary(model)
+    
+    # Determine model type and variable names
+    parts <- strsplit(model_name, "_vs_")[[1]]
+    response <- parts[1]
+    predictor_and_type <- parts[2]
+    
+    # Separate predictor and model type
+    predictor <- sub("_.*$", "", predictor_and_type)
+    model_type <- sub("^.*_", "", predictor_and_type)
+    
+    # Extract diagnostics
+    aic_val <- AIC(model)
+    r_squared <- model_summary$r.sq
+    edf <- if ("edf" %in% names(model_summary)) model_summary$edf[1] else NA
+    gcv_score <- model$gcv.ubre
+    
+    # Extract p-value depending on model type
+    p_value <- tryCatch({
+      if (model_type == "GAM") {
+        model_summary$s.table[1, "p-value"]
+      } else if (model_type == "GLM") {
+        model_summary$p.table["predictor", "Pr(>|t|)"]
+      } else {
+        NA
+      }
+    }, error = function(e) NA)
+    
+    # Store results
+    comparison_results <- rbind(comparison_results, data.frame(
+      Response = response,
+      Predictor = predictor,
+      Model_Type = model_type,
+      AIC = aic_val,
+      R_squared = r_squared,
+      EDF = edf,
+      GCV_UBRE = gcv_score,
+      p_value = p_value,
+      stringsAsFactors = FALSE
+    ))
+    
+  }, error = function(e) {
+    message("Error extracting diagnostics for ", model_name, ": ", e$message)
+  })
+}
+
+# View comparison table
+print(comparison_results)
+```
+
+# Model selection proceedure selecting lower GCV scores from the comparison_results table
+```{r}
+library(dplyr)
+
+# Compare GAM vs GLM for each Response-Predictor pair
+model_selection <- comparison_results %>%
+  group_by(Response, Predictor) %>%
+  filter(Model_Type %in% c("GAM", "GLM")) %>%
+  arrange(GCV_UBRE) %>%
+  slice(1)  # Select model with lowest GCV
+
+
+print(model_selection)
+
+```
+
+# create plots 
+```{r}
+library(gratia)
+library(ggplot2)
+library(patchwork)
+
+plot_list <- list()
+
+for (i in seq_len(nrow(model_selection))) {
+  row <- model_selection[i, ]
+  response <- row$Response
+  predictor <- row$Predictor
+  model_type <- row$Model_Type
+  
+  full_model_name <- paste0(response, "_vs_", predictor, "_", model_type)
+  model <- model_list[[full_model_name]]
+  
+  if (!is.null(model)) {
+    if (model_type == "GAM") {
+      # Use gratia::draw for GAMs
+      p <- draw(model) +
+        labs(
+          title = paste("GAM:", response, "vs", predictor),
+          x = predictor,
+          y = response
+        )
+    } 
+    
+    # use ggplot2 for GLMs
+  else if (model_type == "GLM") {
+    df <- model$model
+    df$fit <- fitted(model)
+    df$se <- sqrt(model$scale) * predict(model, type = "link", se.fit = TRUE)$se.fit
+  
+  # Compute confidence bounds (±1 SD)
+  df$upper <- df$fit + df$se
+  df$lower <- df$fit - df$se
+  
+  p <- ggplot(df, aes_string(x = "predictor", y = "response")) +
+    geom_point(alpha = 0.6) +
+    geom_line(aes(y = fit), color = "blue", linewidth = 1) +
+    geom_ribbon(aes(ymin = lower, ymax = upper), fill = "blue", alpha = 0.2) +
+    labs(
+      title = paste("GLM:", response, "vs", predictor),
+      x = predictor,
+      y = response
+    ) +
+    theme_minimal()
+}
+
+    
+    plot_list[[full_model_name]] <- p
+  }
+}
+
+# Combine and display plots
+combined_plot <- wrap_plots(plot_list, ncol = 4)
+print(combined_plot)
+
+```
+
+
+```{r}
+library(gratia)
+library(ggplot2)
+
+# Loop through GAM models in model_list
+for (model_name in names(model_list)) {
+  if (grepl("_GAM$", model_name)) {
+    model <- model_list[[model_name]]
+    
+    # Compute derivatives of the smooth term
+    deriv <- derivatives(model, term = "predictor", partial_match =TRUE)
+    
+    # Identify threshold points where derivative crosses zero
+    zero_crossings <- deriv$predictor[which(diff(sign(deriv$derivative)) != 0)]
+    
+    # Plot derivative with threshold points
+    p <- draw(deriv) +
+      geom_vline(xintercept = zero_crossings, linetype = "dashed", color = "red") +
+      labs(
+        title = paste("Derivative Analysis:", model_name),
+        x = "Predictor",
+        y = "Derivative"
+      )
+    
+    print(p)
+  }
+}
+
+```
+
