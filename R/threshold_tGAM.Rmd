@@ -1,9 +1,11 @@
 # setup
 ```{r}
+
+library(tidyverse)
 library(mgcv)
 library(gratia)
-library(dplyr)
-library(purrr)
+library(ggplot2)
+library(patchwork)
 library(marea)
 ```
 
@@ -31,185 +33,368 @@ nafo_ind_4X<-nafo_ei_4X@data |>
            )
 
 ```
-# set region
+
+# set region and model selection rules 
 ```{r}
-#more for saving options
-region<-"4X"
 
-```
+# --- Region label (used in filenames) ---
+region <- "4X"
 
-# Step 1. Fit GLM GAM threshold GAM with grid search for c
-```{r}
-# ---- Step 1: Fit GLM, GAM, and threshold GAM with consistent settings 
-
-# Consistent fitting options across all models
+# --- Global model options (consistent across GLM/GAM/tGAM) ---
 fit_method <- "REML"
-use_select <- TRUE     # apply the same shrinkage to all contenders
-gamma_val  <- 1.4      # conservative penalty (apply to all models)
+use_select <- TRUE
+gamma_val  <- 1.4
 
-# Helper: fit a threshold GAM with a hinge term and grid-search for c
+# --- Selection rule parameters ---
+tolerance <- 0.01  # 1% REML tolerance
+alpha     <- 0.08  # hinge significance threshold (TGAM)
+
+# --- Bootstrap controls (serial; no parallel) ---
+set.seed(20240229)
+n_boot       <- 100   # increase to 500+ for final results
+min_success  <- 50
+n_grid       <- 300
+min_run      <- 5
+trim_bd      <- 0.05  # for max-curvature edge trim
+
+# ---- Helper: robust column accessor (gratia version-proof) ----*maybe move to .R*
+get_col <- function(df, candidates) {
+  for (nm in candidates) if (nm %in% names(df)) return(df[[nm]])
+  stop("None of the candidate columns found: ", paste(candidates, collapse = ", "))
+}
+
+# ---- Helper: prediction grid builder ----
+build_grid <- function(model, pred, n = 400) {
+  stopifnot(pred %in% names(model$model))
+  rng <- range(model$model[[pred]], na.rm = TRUE)
+  setNames(data.frame(seq(rng[1], rng[2], length.out = n)), pred)
+}
+
+# ---- Effective thresholds on a GAM ----
+effective_derivative_onset <- function(model, predictor, min_run = 5, n = 400) {
+  nd <- build_grid(model, predictor, n)
+  der <- try(
+    derivatives(model, term = paste0("s(", predictor, ")"),
+                order = 1, type = "link", interval = "confidence",
+                newdata = nd, partial_match = TRUE),
+    silent = TRUE
+  )
+  if (inherits(der, "try-error")) return(tibble(Deriv_Onset = NA_real_, Deriv_Onset_Sign = NA_character_))
+  x     <- get_col(der, c(predictor))
+  lower <- get_col(der, c("lower", "lower_ci"))
+  upper <- get_col(der, c("upper", "upper_ci"))
+  sig <- ifelse(lower > 0,  1L, ifelse(upper < 0, -1L, 0L))
+  rl <- rle(sig)
+  pos <- 0L; onset_x <- NA_real_; onset_sign <- NA_character_
+  for (i in seq_along(rl$lengths)) {
+    len <- rl$lengths[i]; val <- rl$values[i]
+    idx_start <- pos + 1L; idx_end <- pos + len; pos <- idx_end
+    if (val != 0L && len >= min_run) {
+      onset_x <- x[idx_start]
+      onset_sign <- if (val == 1L) "positive" else "negative"
+      break
+    }
+  }
+  tibble(Deriv_Onset = onset_x, Deriv_Onset_Sign = onset_sign)
+}
+
+effective_max_curvature <- function(model, predictor, trim = 0.05, n = 400) {
+  nd <- build_grid(model, predictor, n)
+  der2 <- try(
+    derivatives(model, term = paste0("s(", predictor, ")"),
+                order = 2, type = "link", interval = "none",
+                newdata = nd, partial_match = TRUE),
+    silent = TRUE
+  )
+  if (inherits(der2, "try-error")) return(tibble(Max_Curvature_x = NA_real_, Max_Curvature_val = NA_real_))
+  x  <- get_col(der2, c(predictor))
+  d2 <- get_col(der2, c(".derivative", "derivative"))
+  k <- length(x)
+  i1 <- max(1, floor(trim * k))
+  i2 <- min(k,  ceiling((1 - trim) * k))
+  if (i2 <= i1) return(tibble(Max_Curvature_x = NA_real_, Max_Curvature_val = NA_real_))
+  sl <- seq(i1, i2)
+  idx <- sl[which.max(abs(d2[sl]))]
+  tibble(Max_Curvature_x = x[idx], Max_Curvature_val = d2[idx])
+}
+
+compute_effective_thresholds <- function(model, predictor, min_run = 5, trim = 0.05, n = 400) {
+  a <- effective_derivative_onset(model, predictor, min_run = min_run, n = n)
+  b <- effective_max_curvature(model, predictor, trim = trim, n = n)
+  bind_cols(a, b)
+}
+
+# ---- Robust derivative zero-crossings (GAM) using CI ----
+robust_gam_crossings <- function(model, predictor, n = 300) {
+  if (!predictor %in% names(model$model)) return(NULL)
+  x_min <- min(model$model[[predictor]], na.rm = TRUE)
+  x_max <- max(model$model[[predictor]], na.rm = TRUE)
+  if (!is.finite(x_min) || !is.finite(x_max) || x_min == x_max) return(NULL)
+  nd <- setNames(data.frame(seq(x_min, x_max, length.out = n)), predictor)
+  deriv <- try(
+    derivatives(model, term = paste0("s(", predictor, ")"),
+                order = 1, type = "link", interval = "confidence",
+                newdata = nd, partial_match = TRUE),
+    silent = TRUE
+  )
+  if (inherits(deriv, "try-error")) return(NULL)
+  x     <- get_col(deriv, c(predictor))
+  d     <- get_col(deriv, c(".derivative", "derivative"))
+  lower <- get_col(deriv, c("lower", "lower_ci"))
+  upper <- get_col(deriv, c("upper", "upper_ci"))
+  sig_class <- ifelse(lower > 0, 1L, ifelse(upper < 0, -1L, 0L))
+  idx <- which(diff(sig_class) != 0 & sig_class[-length(sig_class)] != 0 & sig_class[-1] != 0)
+  if (length(idx) == 0) return(NULL)
+  crossings <- purrr::map_dbl(idx, function(i) {
+    x1 <- x[i]; x2 <- x[i + 1]; d1 <- d[i]; d2 <- d[i + 1]
+    if (!is.finite(d2 - d1) || (d2 - d1) == 0) return(NA_real_)
+    x1 - d1 * (x2 - x1) / (d2 - d1)
+  })
+  crossings <- crossings[is.finite(crossings)]
+  if (length(crossings) == 0) return(NULL)
+  tibble(Crossing_Index = seq_along(crossings),
+         Derivative_Zero_Crossing = crossings)
+}
+
+# ---- tGAM: grid-search hinge (continuous kink) ----
 fit_threshold_gam <- function(df, resp, pres,
                               family = tw(),
                               method = fit_method,
                               select = use_select,
-                              gamma = gamma_val,
+                              gamma  = gamma_val,
                               k_main = NULL, k_hinge = NULL,
                               probs_grid = seq(0.15, 0.85, by = 0.02),
                               min_per_side = 6) {
   n <- nrow(df)
   if (is.null(k_main))  k_main  <- max(5, min(10, floor(n / 4)))
   if (is.null(k_hinge)) k_hinge <- max(5, min(10, floor(n / 4)))
-  
   x <- df[[pres]]
-  y <- df[[resp]]
-  
-  # Candidate thresholds from central quantiles; ensure enough data on both sides
   cands <- unique(quantile(x, probs = probs_grid, na.rm = TRUE, names = FALSE))
   cands <- cands[is.finite(cands)]
   cands <- cands[vapply(cands, function(c0) {
     sum(x <= c0, na.rm = TRUE) >= min_per_side && sum(x > c0, na.rm = TRUE) >= min_per_side
   }, logical(1))]
-  
   if (length(cands) == 0L) return(NULL)
-  
-  best <- NULL
-  best_score <- Inf
-  best_c <- NA_real_
-  
+
+  best <- NULL; best_score <- Inf; best_c <- NA_real_
   for (c0 in cands) {
     df$hinge <- pmax(0, df[[pres]] - c0)
-    # Continuous kink: y ~ s(x) + s(hinge)
     fml <- as.formula(paste0(resp, " ~ s(", pres, ", k=", k_main, ") + s(hinge, k=", k_hinge, ")"))
-    
     fit <- try(
       gam(fml, data = df, family = family, method = method, select = select, gamma = gamma),
       silent = TRUE
     )
     if (inherits(fit, "try-error")) next
-    
     score <- fit$gcv.ubre
     if (!is.finite(score)) next
-    
-    if (score < best_score) {
-      best <- fit
-      best_score <- score
-      best_c <- c0
-    }
+    if (score < best_score) { best <- fit; best_score <- score; best_c <- c0 }
   }
-  
   if (is.null(best)) return(NULL)
   attr(best, "threshold") <- best_c
   best
 }
 
-# Identify indicator and pressure tables
+# ---- Bootstrap (slope) global controls ----
+use_block_boot <- TRUE    # TRUE recommended for time series
+block_size     <- 5       # choose based on ACF/seasonality
+B_slope        <- 300     # 300 for development; 500–1000 for final
+
+# ---- Helpers: Paired moving-block bootstrap indices ----
+paired_mbb_indices <- function(n, B, block_size = 5) {
+  if (is.null(block_size) || block_size <= 1L) {
+    replicate(B, sample.int(n, replace = TRUE), simplify = FALSE)
+  } else {
+    sample_blocks <- function() {
+      starts <- sample.int(n - block_size + 1L, size = ceiling(n / block_size), replace = TRUE)
+      idx <- unlist(Map(seq.int, from = starts, to = starts + block_size - 1L))
+      idx[seq_len(n)]
+    }
+    replicate(B, sample_blocks(), simplify = FALSE)
+  }
+}
+
+# ---- Helper: get derivative column robustly (gratia version-proof) ----
+get_deriv_col <- function(df) {
+  if (".derivative" %in% names(df)) return(df[[".derivative"]])
+  if ("derivative"  %in% names(df)) return(df[["derivative"]])
+  stop("Could not find derivative column from gratia::derivatives() output.")
+}
+
+# ---- Bootstrap the GAM slope (first derivative) on a common grid ----
+bootstrap_gam_slope <- function(model, predictor, B = 300, block_size = 5, n_grid = 300) {
+  stopifnot(inherits(model, "gam"))
+  df <- model$model
+  n  <- nrow(df)
+  if (!predictor %in% names(df) || n < 10) return(NULL)
+
+  x_min <- min(df[[predictor]], na.rm = TRUE)
+  x_max <- max(df[[predictor]], na.rm = TRUE)
+  nd    <- setNames(data.frame(seq(x_min, x_max, length.out = n_grid)), predictor)
+
+  idx_list <- paired_mbb_indices(n, B, if (use_block_boot) block_size else 1L)
+  d1_mat <- matrix(NA_real_, nrow = n_grid, ncol = B)
+
+  for (b in seq_len(B)) {
+    df_b <- df[idx_list[[b]], , drop = FALSE]
+    fit_b <- try(
+      mgcv::gam(formula(model), data = df_b,
+                family = model$family, method = model$method,
+                select = TRUE, gamma = model$gamma),
+      silent = TRUE
+    )
+    if (inherits(fit_b, "try-error")) next
+
+    d1_b <- try(
+      gratia::derivatives(
+        fit_b, term = paste0("s(", predictor, ")"),
+        order = 1, type = "link", interval = "none",
+        newdata = nd, partial_match = TRUE
+      ),
+      silent = TRUE
+    )
+    if (!inherits(d1_b, "try-error")) {
+      d1_mat[, b] <- get_deriv_col(d1_b)
+    }
+  }
+
+  # Quantiles per grid point (require at least 20% successful draws)
+  qfun <- function(v) {
+    apply(v, 1, function(z) {
+      z <- z[is.finite(z)]
+      if (length(z) < ceiling(0.2 * B)) return(c(NA, NA, NA))
+      stats::quantile(z, c(0.025, 0.5, 0.975), na.rm = TRUE)
+    })
+  }
+  q1 <- qfun(d1_mat)
+  tibble::tibble(
+    !!predictor := nd[[predictor]],
+    slope_q025 = q1[1, ], slope_med = q1[2, ], slope_q975 = q1[3, ]
+  )
+}
+
+# ---- Helper: slope onset detector (first run of significant slope) ----
+# Returns first x where the slope CI excludes 0 for >= min_run consecutive grid points
+slope_onset_from_ci <- function(slope_df, xvar, min_run = 5) {
+  stopifnot(all(c("slope_q025", "slope_q975") %in% names(slope_df)))
+  x   <- slope_df[[xvar]]
+  low <- slope_df$slope_q025
+  up  <- slope_df$slope_q975
+  sig <- ifelse(low > 0,  1L, ifelse(up < 0, -1L, 0L))
+  rl  <- rle(sig)
+  pos <- 0L
+  for (i in seq_along(rl$lengths)) {
+    len <- rl$lengths[i]; val <- rl$values[i]
+    idx_start <- pos + 1L; pos <- pos + len
+    if (val != 0L && len >= min_run) {
+      return(tibble::tibble(
+        Slope_Onset_x = x[idx_start],
+        Slope_Onset_Sign = if (val == 1L) "positive" else "negative"
+      ))
+    }
+  }
+  tibble::tibble(Slope_Onset_x = NA_real_, Slope_Onset_Sign = NA_character_)
+}
+
+# ---- Helper: zero-crossings of the bootstrap-median slope (linear interpolation) ----
+slope_zero_crossings <- function(slope_df, xvar) {
+  x <- slope_df[[xvar]]
+  y <- slope_df$slope_med
+  if (length(x) < 2 || sum(is.finite(y)) < 2) return(numeric(0))
+  idx <- which(diff(sign(y)) != 0 & is.finite(y[-length(y)]) & is.finite(y[-1]))
+  if (!length(idx)) return(numeric(0))
+  crossings <- purrr::map_dbl(idx, function(i) {
+    x1 <- x[i]; x2 <- x[i + 1]; y1 <- y[i]; y2 <- y[i + 1]
+    if (!is.finite(y2 - y1) || (y2 - y1) == 0) return(NA_real_)
+    x1 - y1 * (x2 - x1) / (y2 - y1)
+  })
+  crossings[is.finite(crossings)]
+}
+```
+
+# Step 1. Fit GLM GAM threshold GAM with grid search for c
+```{r}
+# ---- Step 1: Fit models ----
 indicators <- nafo_ind_4X
 pressures  <- nafo_pres_4X
 
 model_list <- list()
 
-for (a_col in names(indicators)) {         # Indicator variables (responses)
-  for (b_col in names(pressures)) {        # Pressure variables (predictors)
+for (a_col in names(indicators)) {
+  for (b_col in names(pressures)) {
     tryCatch({
-      df <- data.frame(
-        resp = indicators[[a_col]],
-        pres = pressures[[b_col]]
-      )
+      df <- data.frame(resp = indicators[[a_col]], pres = pressures[[b_col]])
       colnames(df) <- c(a_col, b_col)
       df <- na.omit(df)
-      
-      # Only fit if sufficient data and nonzero variance
       if (nrow(df) < 10 || var(df[[b_col]]) == 0 || var(df[[a_col]]) == 0) next
-      
+
       # GAM
-      gam_formula <- as.formula(paste(a_col, "~ s(", b_col, ")"))
-      gam_model <- gam(
-        gam_formula, data = df, method = fit_method, family = tw(),
-        select = use_select, gamma = gamma_val
-      )
-      
-      # GLM (fit with gam() engine for consistency)
-      glm_formula <- as.formula(paste(a_col, "~", b_col))
-      glm_model <- gam(
-        glm_formula, data = df, method = fit_method, family = tw(),
-        select = use_select, gamma = gamma_val
-      )
-      
-      # tGAM via grid search
-      tgam_model <- fit_threshold_gam(
-        df = df, resp = a_col, pres = b_col,
-        family = tw(), method = fit_method, select = use_select, gamma = gamma_val
-      )
-      
-      # Store models
+      gam_model <- gam(as.formula(paste(a_col, "~ s(", b_col, ")")),
+                       data = df, method = fit_method, family = tw(),
+                       select = use_select, gamma = gamma_val)
+
+      # GLM via gam()
+      glm_model <- gam(as.formula(paste(a_col, "~", b_col)),
+                       data = df, method = fit_method, family = tw(),
+                       select = use_select, gamma = gamma_val)
+
+      # tGAM
+      tgam_model <- fit_threshold_gam(df, resp = a_col, pres = b_col, family = tw())
+
       base <- paste(a_col, b_col, sep = "_vs_")
-      model_list[[paste0(base, "_GAM")]]  <- gam_model
-      model_list[[paste0(base, "_GLM")]]  <- glm_model
-      if (!is.null(tgam_model)) {
-        model_list[[paste0(base, "_TGAM")]] <- tgam_model
-      }
-      
+      model_list[[paste0(base, "_GAM")]] <- gam_model
+      model_list[[paste0(base, "_GLM")]] <- glm_model
+      if (!is.null(tgam_model)) model_list[[paste0(base, "_TGAM")]] <- tgam_model
     }, error = function(e) {
       message("Error fitting models for ", a_col, " vs ", b_col, ": ", e$message)
     })
   }
 }
 
+
 ```
 
-#Step 2. Extract diagonstics (tGAM)
+#Step 2. Extract model diagonstics 
 ```{r}
+# ---- Step 2: Diagnostics ----
 comparison_results <- data.frame()
 
 for (model_name in names(model_list)) {
   tryCatch({
     model <- model_list[[model_name]]
     smry  <- summary(model)
-    
-    # Parse names
+
     parts <- strsplit(model_name, "_vs_")[[1]]
     response <- parts[1]
     predictor_and_type <- parts[2]
     predictor <- sub("_.*$", "", predictor_and_type)
     model_type <- sub("^.*_", "", predictor_and_type)
-    
-    # Extract diagnostics
+
     aic_val   <- AIC(model)
     r_squared <- smry$r.sq
     gcv_ubre  <- model$gcv.ubre
-    # sum of edf across smooths if present
     edf_total <- tryCatch({
-      if (!is.null(smry$s.table)) {
-        sum(smry$s.table[, "edf"], na.rm = TRUE)
-      } else if (!is.null(model$edf)) {
-        sum(model$edf, na.rm = TRUE)
-      } else NA_real_
+      if (!is.null(smry$s.table)) sum(smry$s.table[, "edf"], na.rm = TRUE)
+      else if (!is.null(model$edf)) sum(model$edf, na.rm = TRUE)
+      else NA_real_
     }, error = function(e) NA_real_)
-    
-    # p-value: for GAM use the smooth p-value; for GLM use parametric
+
     p_value <- tryCatch({
       if (model_type == "GAM") {
         smry$s.table[1, "p-value"]
       } else if (model_type == "GLM") {
-        # try to use predictor row
-        if (predictor %in% rownames(smry$p.table)) {
-          smry$p.table[predictor, "Pr(>|t|)"]
-        } else {
-          smry$p.table[2, "Pr(>|t|)"]
-        }
+        if (predictor %in% rownames(smry$p.table)) smry$p.table[predictor, "Pr(>|t|)"]
+        else smry$p.table[2, "Pr(>|t|)"]
       } else if (model_type == "TGAM") {
-        # Prefer the hinge term's p-value if available
         if (!is.null(smry$s.table) && "s(hinge)" %in% rownames(smry$s.table)) {
           smry$s.table["s(hinge)", "p-value"]
         } else if (!is.null(smry$s.table)) {
-          # fallback to max significance among smooths
           min(smry$s.table[, "p-value"], na.rm = TRUE)
         } else NA
       } else NA
     }, error = function(e) NA)
-    
+
     threshold <- if (model_type == "TGAM") attr(model, "threshold") else NA_real_
-    
+
     comparison_results <- rbind(
       comparison_results,
       data.frame(
@@ -231,115 +416,34 @@ for (model_name in names(model_list)) {
 }
 
 print(comparison_results)
-
 ```
 
 # Step 3. Model Selection
 ```{r}
-# ---- Step 3: Selection where GAM wins only if tGAM hinge is NOT significant AND tGAM is NOT within REML tolerance ----
-library(dplyr)
-
-# Tunable parameters
-tolerance <- 0.01  # 1% tolerance on GCV_UBRE (REML objective)
-alpha     <- 0.08  # significance level for the hinge term
-
+# ---- Step 3: Model selection ----
 model_selection <- comparison_results %>%
-  # Consider only the candidate model types
   filter(Model_Type %in% c("GLM", "GAM", "TGAM")) %>%
   group_by(Response, Predictor) %>%
-  # Compute best non-TGAM score (GAM or GLM)
   mutate(
-    best_non_tgam_gcv   = suppressWarnings(min(GCV_UBRE[Model_Type != "TGAM"], na.rm = TRUE)),
-    best_non_tgam_aic   = suppressWarnings(min(AIC[Model_Type != "TGAM"], na.rm = TRUE)),
-    # Identify the row of the TGAM (if any) to use its stats in the rule
-    tgam_gcv            = ifelse(Model_Type == "TGAM", GCV_UBRE, NA_real_),
-    tgam_p              = ifelse(Model_Type == "TGAM", p_value, NA_real_)
+    best_non_tgam_gcv = suppressWarnings(min(GCV_UBRE[Model_Type != "TGAM"], na.rm = TRUE)),
+    tgam_gcv          = ifelse(Model_Type == "TGAM", GCV_UBRE, NA_real_),
+    tgam_p            = ifelse(Model_Type == "TGAM", p_value,  NA_real_),
+    tgam_exists       = any(Model_Type == "TGAM"),
+    tgam_gcv_any      = suppressWarnings(min(tgam_gcv, na.rm = TRUE)),
+    tgam_p_any        = suppressWarnings(min(tgam_p,  na.rm = TRUE)),
+    tgam_within_tol   = ifelse(is.finite(best_non_tgam_gcv) & is.finite(tgam_gcv_any),
+                               tgam_gcv_any <= best_non_tgam_gcv * (1 + tolerance), FALSE),
+    tgam_hinge_sig    = ifelse(is.finite(tgam_p_any), tgam_p_any < alpha, FALSE),
+    prefer_tgam       = tgam_exists & (tgam_hinge_sig | tgam_within_tol)
   ) %>%
-  # Broadcast tGAM stats to all rows in the group (for decision logic)
-  mutate(
-    tgam_exists         = any(Model_Type == "TGAM"),
-    tgam_gcv_any        = suppressWarnings(min(tgam_gcv, na.rm = TRUE)),
-    tgam_p_any          = suppressWarnings(min(tgam_p,  na.rm = TRUE)),  # min to pass through single value
-    # Is tGAM within tolerance of the best non-tGAM?
-    tgam_within_tol     = ifelse(is.finite(best_non_tgam_gcv) & is.finite(tgam_gcv_any),
-                                 tgam_gcv_any <= best_non_tgam_gcv * (1 + tolerance),
-                                 FALSE),
-    # Is hinge significant?
-    tgam_hinge_sig      = ifelse(is.finite(tgam_p_any), tgam_p_any < alpha, FALSE),
-
-    # Decision priority flag:
-    # Prefer TGAM if it exists AND (hinge significant OR within tolerance)
-    prefer_tgam         = tgam_exists & (tgam_hinge_sig | tgam_within_tol)
-  ) %>%
-  # Now rank within each Response-Predictor group:
-  # 1) If prefer_tgam == TRUE, pick TGAM with best GCV_UBRE
-  # 2) Else (prefer_tgam == FALSE), pick absolute best by GCV_UBRE
-  arrange(
-    # Put preferred type first
-    desc(prefer_tgam & Model_Type == "TGAM"),
-    # Then rank by objective
-    GCV_UBRE,
-    AIC
-  ) %>%
+  arrange(desc(prefer_tgam & Model_Type == "TGAM"), GCV_UBRE, AIC) %>%
   slice(1) %>%
   ungroup()
 
 print(model_selection)
-
-# 
-# model_selection <- comparison_results %>%
-#   filter(Model_Type %in% c("GLM", "GAM", "TGAM")) %>%
-#   group_by(Response, Predictor) %>%
-#   arrange(GCV_UBRE) %>%
-#   slice(1) %>%
-#   ungroup()
-# 
-# print(model_selection)
-# # ---- Build and save threshold results table ----
-# 
-# # Helper: collapse multiple crossings into a single string
-# collapse_crossings <- function(model_key, crossings_df) {
-#   if (is.null(crossings_df) || nrow(crossings_df) == 0) return(NA_character_)
-#   vals <- crossings_df$Predictor_Zero_Crossing[crossings_df$Model == model_key]
-#   if (length(vals) == 0) return(NA_character_)
-#   paste(signif(vals, 4), collapse = ", ")
-# }
-# 
-# # Compose table of best models (+ thresholds/crossings)
-# best_models_table <- model_selection %>%
-#   rowwise() %>%
-#   mutate(
-#     # Build the model key used in model_list
-#     Model_Key = paste0(Response, "_vs_", Predictor, "_", Model_Type),
-#     # Bring in threshold if TGAM
-#     Threshold = if (Model_Type == "TGAM") {
-#       thr <- try(attr(model_list[[Model_Key]], "threshold"), silent = TRUE)
-#       if (inherits(thr, "try-error")) NA_real_ else as.numeric(thr)
-#     } else NA_real_,
-#     # Gather derivative zero-crossings if GAM
-#     Derivative_Zero_Crossings = if (Model_Type == "GAM") {
-#       collapse_crossings(Model_Key, crossings_df)
-#     } else NA_character_
-#   ) %>%
-#   ungroup() %>%
-#   # Reorder and clean columns
-#   select(
-#     Response, Predictor, Model_Type,
-#     AIC, R_squared, EDF, GCV_UBRE, p_value,
-#     Threshold, Derivative_Zero_Crossings
-#   ) %>%
-#   arrange(Response, Predictor)
-# 
-# # Optional: attach a region label if you have one
-# if (!exists("region")) region <- "unknown"
-# 
-# # Inspect in console
-# print(best_models_table)
-
-
 ```
 
-# Step 4. Zero crossings for GAMs and threshold extraction for tGAMs
+# Step 4. Threshold analysis
 
 ```{r}
 # ---- Step 4: Robust GAM derivative zero-crossings + tGAM threshold extraction (patched) ----
@@ -498,232 +602,427 @@ thresholds_all_df <- thresholds_all_df %>%
   arrange(Response, Predictor)
 
 print(thresholds_all_df)
-# # Derivative zero-crossings for GAMs (unchanged)
-# crossings_list <- list()
-# 
-# for (model_name in names(model_list)) {
-#   if (grepl("_GAM$", model_name)) {
-#     model <- model_list[[model_name]]
-#     parts <- strsplit(model_name, "_vs_")[[1]]
-#     response <- parts[1]
-#     predictor <- sub("_GAM$", "", parts[2])
-#     term_name <- paste0("s(", predictor, ")")
-#     
-#     deriv <- try(derivatives(model, term = term_name, partial_match = TRUE), silent = TRUE)
-#     if (inherits(deriv, "try-error")) next
-#     
-#     dvals <- deriv$.derivative
-#     xvals <- deriv[[predictor]]
-#     sign_change_idx <- which(diff(sign(dvals)) != 0)
-#     crossings <- numeric(0)
-#     for (i in seq_along(sign_change_idx)) {
-#       idx <- sign_change_idx[i]
-#       x1 <- xvals[idx]; x2 <- xvals[idx + 1]
-#       y1 <- dvals[idx]; y2 <- dvals[idx + 1]
-#       crossings <- c(crossings, x1 - y1 * (x2 - x1) / (y2 - y1))
-#     }
-#     crossings_list[[model_name]] <- crossings
-#   }
-# }
-# 
-# crossings_df <- do.call(rbind, lapply(names(crossings_list), function(name) {
-#   crossings <- crossings_list[[name]]
-#   if (length(crossings) > 0) {
-#     data.frame(
-#       Model = name,
-#       Crossing_Index = seq_along(crossings),
-#       Predictor_Zero_Crossing = crossings
-#     )
-#   } else NULL
-# }))
-# 
-# if (!is.null(crossings_df)) print(crossings_df)
-# 
-# # Thresholds for tGAMs
-# threshold_df <- do.call(rbind, lapply(names(model_list), function(name) {
-#   if (!grepl("_TGAM$", name)) return(NULL)
-#   thr <- attr(model_list[[name]], "threshold")
-#   if (is.null(thr) || !is.finite(thr)) return(NULL)
-#   data.frame(Model = name, Threshold = thr)
-# }))
-# 
-# if (!is.null(threshold_df)) print(threshold_df)
 
-```
-#Step 5a. Plotting tGAM
-```{r}
 
 ```
 
-
-#Step 5. Plotting GAM & tGam
+# Step 4b. Compute slope CIs for selected models
 ```{r}
+# ---- Step 4b: Bootstrap slopes for selected GAMs ----
+selected_only <- TRUE #select FALSE for all models
+
+target_gams <- if (selected_only) {
+  model_selection %>% filter(Model_Type == "GAM") %>%
+    transmute(Key = paste0(Response, "_vs_", Predictor, "_", Model_Type))
+} else {
+  tibble::tibble(Key = names(model_list)[grepl("_GAM$", names(model_list))])
+}
+
+gam_slope_boot_list <- list()
+gam_slope_boot_summary_list <- list()
+
+for (key in target_gams$Key) {
+  model <- model_list[[key]]
+  if (is.null(model) || !inherits(model, "gam")) next
+
+  parts <- strsplit(key, "_vs_")[[1]]
+  response <- parts[1]
+  predictor <- sub("_.*$", "", parts[2])
+
+  slope_df <- try(
+    bootstrap_gam_slope(model, predictor,
+                        B = B_slope, block_size = block_size, n_grid = n_grid),
+    silent = TRUE
+  )
+  if (inherits(slope_df, "try-error") || is.null(slope_df)) next
+
+  slope_df$Model     <- key
+  slope_df$Response  <- response
+  slope_df$Predictor <- predictor
+
+  gam_slope_boot_list[[key]] <- slope_df
+
+  # Extract onset and crossings
+  onset <- slope_onset_from_ci(slope_df, predictor, min_run = min_run)
+  crossings <- slope_zero_crossings(slope_df, predictor)
+  gam_slope_boot_summary_list[[key]] <- tibble::tibble(
+    Model = key, Response = response, Predictor = predictor,
+    Slope_Onset_x = onset$Slope_Onset_x,
+    Slope_Onset_Sign = onset$Slope_Onset_Sign,
+    Slope_Zero_Crossings = if (length(crossings)) paste(signif(crossings, 4), collapse = ", ") else NA_character_
+  )
+}
+
+gam_slope_boot_df <- if (length(gam_slope_boot_list)) dplyr::bind_rows(gam_slope_boot_list) else
+  tibble::tibble(Model=character(), Response=character(), Predictor=character(),
+                 slope_q025=numeric(), slope_med=numeric(), slope_q975=numeric())
+
+gam_slope_boot_summary_df <- if (length(gam_slope_boot_summary_list)) dplyr::bind_rows(gam_slope_boot_summary_list) else
+  tibble::tibble(Model=character(), Response=character(), Predictor=character(),
+                 Slope_Onset_x=numeric(), Slope_Onset_Sign=character(), Slope_Zero_Crossings=character())
+
+print(gam_slope_boot_summary_df)
+```
+
+
+#Step 5.Build best model tables
+```{r}
+# ---- Step 5: Best models table ----
+collapse_crossings <- function(model_key, crossings_df) {
+  if (is.null(crossings_df) || nrow(crossings_df) == 0) return(NA_character_)
+  vals <- crossings_df$Derivative_Zero_Crossing[crossings_df$Model == model_key]
+  if (length(vals) == 0) return(NA_character_)
+  paste(signif(vals, 4), collapse = ", ")
+}
+
+best_models_table <- model_selection %>%
+  rowwise() %>%
+  mutate(
+    Model_Key = paste0(Response, "_vs_", Predictor, "_", Model_Type),
+    Threshold = if (Model_Type == "TGAM") {
+      thr <- try(attr(model_list[[Model_Key]], "threshold"), silent = TRUE)
+      if (inherits(thr, "try-error")) NA_real_ else as.numeric(thr)
+    } else NA_real_,
+    Derivative_Zero_Crossings = if (Model_Type == "GAM") {
+      collapse_crossings(Model_Key, crossings_df)
+    } else NA_character_
+  ) %>%
+  ungroup() %>%
+  select(Response, Predictor, Model_Type,
+         AIC, R_squared, EDF, GCV_UBRE, p_value,
+         Threshold, Derivative_Zero_Crossings) %>%
+  arrange(Response, Predictor)
+
+print(best_models_table)
+```
+
+#Step 5b. Unified thresholds table
+```{r}
+# ---- Step 5b: Unified threshold table (tGAM + GAM slope + GAM effective) ----
+
+# Ensure required objects exist (safe empties)
+if (!exists("tgam_boot_summary_df")) tgam_boot_summary_df <- tibble::tibble(
+  Model=character(), Response=character(), Predictor=character(),
+  c_q025=numeric(), c_med=numeric(), c_q975=numeric(), n_success=integer()
+)
+if (!exists("effective_thresholds_df")) effective_thresholds_df <- tibble::tibble(
+  Model=character(), Response=character(), Predictor=character(),
+  Deriv_Onset=numeric(), Deriv_Onset_Sign=character(),
+  Max_Curvature_x=numeric(), Max_Curvature_val=numeric()
+)
+if (!exists("crossings_df")) crossings_df <- tibble::tibble(
+  Model=character(), Response=character(), Predictor=character(),
+  Crossing_Index=integer(), Derivative_Zero_Crossing=numeric()
+)
+if (!exists("gam_slope_boot_summary_df")) gam_slope_boot_summary_df <- tibble::tibble(
+  Model=character(), Response=character(), Predictor=character(),
+  Slope_Onset_x=numeric(), Slope_Onset_Sign=character(), Slope_Zero_Crossings=character()
+)
+
+unified_thresholds <- model_selection %>%
+  mutate(Model_Key = paste0(Response, "_vs_", Predictor, "_", Model_Type)) %>%
+  left_join(
+    tgam_boot_summary_df %>%
+      transmute(Model, tGAM_Threshold_Med = c_med, tGAM_Threshold_q025 = c_q025, tGAM_Threshold_q975 = c_q975),
+    by = c("Model_Key" = "Model")
+  ) %>%
+  left_join(
+    gam_slope_boot_summary_df %>%
+      transmute(Model, Slope_Onset_x, Slope_Onset_Sign, Slope_Zero_Crossings),
+    by = c("Model_Key" = "Model")
+  ) %>%
+  left_join(
+    effective_thresholds_df %>%
+      transmute(Model, Deriv_Onset, Deriv_Onset_Sign, Max_Curvature_x),
+    by = c("Model_Key" = "Model")
+  ) %>%
+  left_join(
+    crossings_df %>%
+      group_by(Model) %>%
+      summarise(Deriv_Zero_Crossings = paste(signif(Derivative_Zero_Crossing, 4), collapse = ", "),
+                .groups = "drop"),
+    by = c("Model_Key" = "Model")
+  ) %>%
+  select(Response, Predictor, Model_Type,
+         # tGAM hinge
+         tGAM_Threshold_Med, tGAM_Threshold_q025, tGAM_Threshold_q975,
+         # GAM slope bootstrap
+         Slope_Onset_x, Slope_Onset_Sign, Slope_Zero_Crossings,
+         # GAM analytical thresholds
+         Deriv_Onset, Deriv_Onset_Sign, Max_Curvature_x,
+         Deriv_Zero_Crossings,
+         # Diagnostics (from selection frame)
+         AIC, R_squared, EDF, GCV_UBRE, p_value) %>%
+  arrange(Response, Predictor)
+
+print(unified_thresholds)
+```
+
+
+#Step 6. Plotting 
+```{r}
+# ---- Step 6: Plot selected models (GLM blue; GAM/TGAM black; TGAM threshold in red) ----
 library(ggplot2)
 library(patchwork)
+library(here)
+# (You already loaded dplyr earlier)
 
 plot_list <- list()
 
 for (i in seq_len(nrow(model_selection))) {
   row <- model_selection[i, ]
-  response <- row$Response
-  predictor <- row$Predictor
+  response   <- row$Response
+  predictor  <- row$Predictor
   model_type <- row$Model_Type
-  full_model_name <- paste0(response, "_vs_", predictor, "_", model_type)
-  model <- model_list[[full_model_name]]
+  key        <- paste0(response, "_vs_", predictor, "_", model_type)
+  model      <- model_list[[key]]
   if (is.null(model)) next
-  
-  if (model_type %in% c("GAM", "TGAM")) {
-    # Build prediction grid
-    x_min <- min(model$model[[predictor]], na.rm = TRUE)
-    x_max <- max(model$model[[predictor]], na.rm = TRUE)
-    pred_vals <- seq(x_min, x_max, length.out = 200)
-    pred_df <- setNames(data.frame(pred_vals), predictor)
-    
-    # If TGAM, add hinge var using the chosen threshold
-    if (model_type == "TGAM") {
-      thr <- attr(model, "threshold")
-      pred_df$hinge <- pmax(0, pred_df[[predictor]] - thr)
-    }
-    
-    # Predict on response scale with approximate CI
-    pred_df$fit <- predict(model, newdata = pred_df, type = "response")
-    pred_conf <- predict(model, newdata = pred_df, type = "link", se.fit = TRUE)
-    pred_df$se <- pred_conf$se.fit
-    # transform link +/- 1.96*se to response scale
-    pred_df$upper <- model$family$linkinv(pred_conf$fit + 1.96 * pred_df$se)
-    pred_df$lower <- model$family$linkinv(pred_conf$fit - 1.96 * pred_df$se)
-    
-    # Base plot
-    p <- ggplot() +
-      geom_point(data = model$model, aes_string(x = predictor, y = response), alpha = 0.5) +
-      geom_line(data = pred_df, aes_string(x = predictor, y = "fit"), color = "black", size = 1) +
-      geom_ribbon(data = pred_df, aes_string(x = predictor, ymin = "lower", ymax = "upper"),
-                  fill = "black", alpha = 0.2) +
-      labs(x = predictor, y = response) +
-      theme_minimal()
-    
-    # Add derivative zero-crossings (GAM) or threshold (TGAM)
-    if (model_type == "GAM" && exists("crossings_df") && !is.null(crossings_df)) {
-      crossings <- crossings_df$Predictor_Zero_Crossing[crossings_df$Model == full_model_name]
+
+  # 1) Build prediction grid
+  x_min <- min(model$model[[predictor]], na.rm = TRUE)
+  x_max <- max(model$model[[predictor]], na.rm = TRUE)
+  pred_vals <- seq(x_min, x_max, length.out = 300)
+  pred_df <- setNames(data.frame(pred_vals), predictor)
+
+  # 2) If TGAM, add hinge using chosen threshold
+  thr <- NA_real_
+  if (model_type == "TGAM") {
+    thr <- attr(model, "threshold")
+    pred_df$hinge <- pmax(0, pred_df[[predictor]] - thr)
+  }
+
+  # 3) Predictions (response scale) + approximate CI via link ± 1.96*SE
+  pred_df$fit <- predict(model, newdata = pred_df, type = "response")
+  pred_conf   <- predict(model, newdata = pred_df, type = "link", se.fit = TRUE)
+  pred_df$se  <- pred_conf$se.fit
+  pred_df$upper <- model$family$linkinv(pred_conf$fit + 1.96 * pred_df$se)
+  pred_df$lower <- model$family$linkinv(pred_conf$fit - 1.96 * pred_df$se)
+
+  # 4) Color palette
+  glm_col  <- "blue"       # BLUE for GLMs
+  gam_col  <- "darkgreen"      # GREEN for GAMs
+  tgam_col <- "black"      # BLACK for tGAM fits
+  thr_col  <- "red"        # RED for threshold & overlays
+
+  # 5) Base plot with points (use tidy-eval via .data pronoun)
+  p <- ggplot() +
+    geom_point(
+      data = model$model,
+      aes(x = .data[[predictor]], y = .data[[response]]),
+      alpha = 0.5
+    ) +
+    labs(x = predictor, y = response) +
+    theme_minimal()
+
+  # 6) Type-specific layers (replace size= with linewidth=)
+  if (model_type == "GLM") {
+    p <- p +
+      geom_line(
+        data = pred_df,
+        aes(x = .data[[predictor]], y = .data[["fit"]]),
+        color = glm_col, linewidth = 1
+      ) +
+      geom_ribbon(
+        data = pred_df,
+        aes(x = .data[[predictor]], ymin = .data[["lower"]], ymax = .data[["upper"]]),
+        fill = glm_col, alpha = 0.2
+      )
+
+  } else if (model_type == "GAM") {
+    p <- p +
+      geom_line(
+        data = pred_df,
+        aes(x = .data[[predictor]], y = .data[["fit"]]),
+        color = gam_col, linewidth = 1
+      ) +
+      geom_ribbon(
+        data = pred_df,
+        aes(x = .data[[predictor]], ymin = .data[["lower"]], ymax = .data[["upper"]]),
+        fill = gam_col, alpha = 0.2
+      )
+
+    # Optional: add robust derivative zero-crossings if computed earlier
+    if (exists("crossings_df") && !is.null(crossings_df) && nrow(crossings_df) > 0) {
+      crossings <- crossings_df$Derivative_Zero_Crossing[crossings_df$Model == key]
       if (length(crossings) > 0) {
         for (v in crossings) {
-          p <- p + geom_vline(xintercept = v, linetype = "dashed", color = "red")
+          if (is.finite(v)) {
+            p <- p + geom_vline(xintercept = v, linetype = "dashed", color = thr_col)
+          }
         }
       }
-    } else if (model_type == "TGAM") {
-      thr <- attr(model, "threshold")
-      if (is.finite(thr)) {
-        p <- p + geom_vline(xintercept = thr, linetype = "dashed", color = "red")
+    }
+
+    # Optional: overlay max-curvature point if available
+    if (exists("effective_thresholds_df") && nrow(effective_thresholds_df) > 0) {
+      row_eff <- dplyr::filter(effective_thresholds_df, Model == key)
+      x_star <- if (nrow(row_eff)) suppressWarnings(as.numeric(row_eff$Max_Curvature_x[1])) else NA_real_
+      if (is.finite(x_star)) {
+        y_star <- tryCatch(
+          predict(model, newdata = setNames(data.frame(x_star), predictor), type = "response"),
+          error = function(e) NA_real_
+        )
+        if (is.finite(y_star)) {
+          p <- p +
+            geom_point(aes(x = x_star, y = y_star), color = thr_col, size = 3) +
+            annotate("text", x = x_star, y = y_star, label = "Max curvature",
+                     hjust = -0.05, vjust = -0.8, color = thr_col, size = 3)
+        }
       }
     }
-    
-  } else if (model_type == "GLM") {
-    df <- model$model
-    df$fit <- fitted(model)
-    df$se  <- sqrt(model$scale) * predict(model, type = "link", se.fit = TRUE)$se.fit
-    df$upper <- df$fit + df$se
-    df$lower <- df$fit - df$se
-    
-    p <- ggplot(df, aes_string(x = predictor, y = response)) +
-      geom_point(alpha = 0.6) +
-      geom_line(aes(y = fit), color = "blue", size = 1) +
-      geom_ribbon(aes(ymin = lower, ymax = upper), fill = "blue", alpha = 0.2) +
-      labs(x = predictor, y = response) +
-      theme_minimal()
+
+    # NEW: Shade regions where bootstrap slope CI excludes 0 (if available)
+    if (exists("gam_slope_boot_df") && nrow(gam_slope_boot_df) > 0) {
+      slope_dat <- gam_slope_boot_df %>% dplyr::filter(Model == key)
+      if (nrow(slope_dat) > 0) {
+        xg <- slope_dat[[predictor]]
+        sig <- with(slope_dat, ifelse(slope_q025 > 0 | slope_q975 < 0, TRUE, FALSE))
+        if (any(sig, na.rm = TRUE)) {
+          p <- p + geom_ribbon(
+            data = data.frame(x = xg, sig = sig),
+            aes(x = x, ymin = -Inf, ymax = Inf),
+            inherit.aes = FALSE,
+            fill = "orange", alpha = 0.06
+          )
+        }
+      }
+    }
+
+    # NEW: Add zero-crossings from bootstrap-median slope (if summarised)
+    if (exists("gam_slope_boot_summary_df") && nrow(gam_slope_boot_summary_df) > 0) {
+      crow <- dplyr::filter(gam_slope_boot_summary_df, Model == key)
+      if (nrow(crow) == 1 && !is.na(crow$Slope_Zero_Crossings)) {
+        for (v in as.numeric(strsplit(crow$Slope_Zero_Crossings, ",\\s*")[[1]])) {
+          if (is.finite(v)) {
+            p <- p + geom_vline(xintercept = v, linetype = "dotted", color = "orange")
+          }
+        }
+      }
+    }
+
+  } else if (model_type == "TGAM") {
+    p <- p +
+      geom_line(
+        data = pred_df,
+        aes(x = .data[[predictor]], y = .data[["fit"]]),
+        color = tgam_col, linewidth = 1
+      ) +
+      geom_ribbon(
+        data = pred_df,
+        aes(x = .data[[predictor]], ymin = .data[["lower"]], ymax = .data[["upper"]]),
+        fill = tgam_col, alpha = 0.2
+      )
+
+    # Red threshold line and optional bootstrap CI band
+    if (is.finite(thr)) {
+      p <- p + geom_vline(xintercept = thr, linetype = "dashed", color = thr_col)
+
+      if (exists("tgam_boot_summary_df") && !is.null(tgam_boot_summary_df) && nrow(tgam_boot_summary_df) > 0) {
+        rowb <- dplyr::filter(tgam_boot_summary_df, Model == key)
+        if (nrow(rowb) == 1 && is.finite(rowb$c_q025) && is.finite(rowb$c_q975)) {
+          p <- p + annotate("rect", xmin = rowb$c_q025, xmax = rowb$c_q975,
+                            ymin = -Inf, ymax = Inf, alpha = 0.08, fill = thr_col)
+        }
+      }
+    }
   }
-  
-  plot_list[[full_model_name]] <- p
+
+  # 7) (Optional) add titles/subtitles
+  # p <- p + labs(title = paste(response, "~", predictor),
+  #               subtitle = paste("Selected model:", model_type))
+
+  plot_list[[key]] <- p
 }
 
+# Combine and print
 combined_plot <- wrap_plots(plot_list, ncol = 4)
 print(combined_plot)
 
+# Save combined figure
+dir.create(here::here("figures"), showWarnings = FALSE, recursive = TRUE)
+ggsave(
+  filename = here::here("figures", paste0("nafo_combined_", region, ".png")),
+  plot     = combined_plot,
+  width    = 16, height = 12, units = "in", dpi = 600, bg = "white"
+)
+
 ```
  
-# Step 6. Save results
+# Step 6b. Derivative panel grid (slope curve with CI)
+
 ```{r}
-# ---- Step 6: Save all results ----
-library(dplyr)
-library(readr)   # for write_csv
-library(here)
-#set region
-region<-"4X"
+# ---- Step 6b: Optional derivative (slope) panels ----
+deriv_plot_list <- list()
+for (i in seq_len(nrow(model_selection))) {
+  row <- model_selection[i, ]
+  if (row$Model_Type != "GAM") next
 
-# Ensure output folders exist
+  response   <- row$Response
+  predictor  <- row$Predictor
+  key        <- paste0(response, "_vs_", predictor, "_", "GAM")
+
+  slope_dat <- gam_slope_boot_df %>% dplyr::filter(Model == key)
+  if (nrow(slope_dat) == 0) next
+
+  dp <- ggplot2::ggplot(slope_dat, aes_string(x = predictor, y = "slope_med")) +
+    ggplot2::geom_ribbon(aes(ymin = slope_q025, ymax = slope_q975),
+                         fill = "steelblue", alpha = 0.2) +
+    ggplot2::geom_line(color = "steelblue4", linewidth = 0.9) +
+    ggplot2::geom_hline(yintercept = 0, linetype = "dashed", color = "grey40") +
+    ggplot2::labs(title = paste0(response, " ~ ", predictor, " (slope)"),
+                  x = predictor, y = "s′(x) [link scale]") +
+    ggplot2::theme_minimal(base_size = 10)
+
+  # Mark slope onset if available
+  ssum <- gam_slope_boot_summary_df %>% dplyr::filter(Model == key)
+  if (nrow(ssum) == 1 && is.finite(ssum$Slope_Onset_x)) {
+    dp <- dp + ggplot2::geom_vline(xintercept = ssum$Slope_Onset_x, color = "orange", linetype = "dashed")
+  }
+
+  deriv_plot_list[[key]] <- dp
+}
+
+if (length(deriv_plot_list)) {
+  deriv_combined_plot <- patchwork::wrap_plots(deriv_plot_list, ncol = 4)
+  print(deriv_combined_plot)
+  dir.create(here::here("figures"), showWarnings = FALSE, recursive = TRUE)
+  ggplot2::ggsave(
+    filename = here::here("figures", paste0("nafo_derivatives_", region, ".png")),
+    plot     = deriv_combined_plot,
+    width    = 16, height = 12, units = "in", dpi = 600, bg = "white"
+  )
+}
+```
+
+# Step 7. Save results
+```{r}
+# ---- Step 7: Save results ----
 dir.create(here::here("results"), showWarnings = FALSE, recursive = TRUE)
-dir.create(here::here("figures"), showWarnings = FALSE, recursive = TRUE)
 
-# Region fallback if not defined
-if (!exists("region")) region <- "unknown"
-
-# 1) Save a single .RData containing everything useful
 rdata_path <- here::here("results", paste0("ei_threshold_results_", region, ".RData"))
+
+# ---- Step 7 addition: include slope bootstrap outputs and unified thresholds ----
+if (!exists("gam_slope_boot_df")) gam_slope_boot_df <- tibble::tibble()
+if (!exists("gam_slope_boot_summary_df")) gam_slope_boot_summary_df <- tibble::tibble()
+if (!exists("unified_thresholds")) unified_thresholds <- tibble::tibble()
+
 save(
-  best_models_table,     # thresholds + crossings per best model
-  model_selection,       # per-pair best model (GLM/GAM/TGAM)
-  comparison_results,    # diagnostics for all fitted models
-  threshold_df,          # thresholds for all TGAMs (if any)
-  crossings_df,          # zero-crossings for all GAMs (if any)
-  model_list,            # the actual fitted model objects
+  best_models_table,
+  model_selection,
+  comparison_results,
+  threshold_df,                 # tGAM thresholds (point)
+  tgam_boot_summary_df,         # tGAM threshold CI summary
+  tgam_boot_samples,            # tGAM bootstrap draws (raw)
+  crossings_df,                 # robust GAM derivative crossings
+  effective_thresholds_df,      # GAM effective thresholds (point)
+  gam_effective_boot_summary_df,# GAM effective thresholds CI summary
+  gam_effective_boot_samples,   # GAM bootstrap draws (raw)
+  gam_slope_boot_df,            # NEW: GAM slope bootstrap grid (per model)
+  gam_slope_boot_summary_df,    # NEW: slope onset & zero-crossings summaries
+  unified_thresholds,           # NEW: unified thresholds table
+  model_list,
   file = rdata_path
 )
 message("Saved .RData: ", rdata_path)
 
-# 2) Save tables individually as CSVs for quick inspection (if objects exist)
-# csv_safe_write <- function(obj, path) {
-#   if (!is.null(obj) && inherits(obj, c("data.frame", "tbl_df")) && nrow(obj) > 0) {
-#     readr::write_csv(obj, path)
-#     message("Saved CSV: ", path)
-#   } else {
-#     message("Skipped CSV (empty or missing): ", path)
-#   }
-# }
-# 
-# csv_safe_write(best_models_table, here::here("tables", paste0("best_models_table_", region, ".csv")))
-# csv_safe_write(model_selection,   here::here("tables", paste0("model_selection_", region, ".csv")))
-# csv_safe_write(comparison_results,here::here("tables", paste0("comparison_results_", region, ".csv")))
-# csv_safe_write(threshold_df,      here::here("tables", paste0("thresholds_tgam_", region, ".csv")))
-# csv_safe_write(crossings_df,      here::here("tables", paste0("zero_crossings_gam_", region, ".csv")))
-
-# # 3) Optional: also save just the best_models_table as an .rds
-# rds_path <- here::here("data", paste0("ei_threshold_results_table_", region, ".rds"))
-# saveRDS(best_models_table, file = rds_path)
-# message("Saved .rds: ", rds_path)
-# 
-# # 4) Optional: save the combined plot if it exists
-# if (exists("combined_plot")) {
-#   png_path <- here::here("figures", paste0("nafo_combined_", region, ".png"))
-#   pdf_path <- here::here("figures", paste0("nafo_combined_", region, ".pdf"))
-#   ggplot2::ggsave(filename = png_path, plot = combined_plot,
-#                   width = 16, height = 12, units = "in", dpi = 300, bg = "white")
-#   ggplot2::ggsave(filename = pdf_path, plot = combined_plot,
-#                   width = 16, height = 12, units = "in", device = cairo_pdf)
-#   message("Saved figures: ", png_path, " and ", pdf_path)
-# }
-# 
-# # 5) Optional: write a compact README-style log to help track what was saved
-# log_lines <- c(
-#   paste0("Region: ", region),
-#   paste0("Timestamp: ", format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z")),
-#   paste0("RData: ", rdata_path),
-#   paste0("Tables CSV folder: ", here::here("tables")),
-#   paste0("Figures folder: ", here::here("figures")),
-#   paste0("Rows | best_models_table: ", if (exists("best_models_table")) nrow(best_models_table) else 0),
-#   paste0("Rows | model_selection: ",   if (exists("model_selection")) nrow(model_selection) else 0),
-#   paste0("Rows | comparison_results: ",if (exists("comparison_results")) nrow(comparison_results) else 0),
-#   paste0("Rows | threshold_df: ",      if (exists("threshold_df") && !is.null(threshold_df)) nrow(threshold_df) else 0),
-#   paste0("Rows | crossings_df: ",      if (exists("crossings_df") && !is.null(crossings_df)) nrow(crossings_df) else 0)
-# )
-# writeLines(log_lines, con = here::here("data", paste0("save_log_", region, ".txt")))
-# message("Wrote save log to: ", here::here("data", paste0("save_log_", region, ".txt")))
-
-# File name (e.g., figures/nafo_combined_<region>.png)
-png_path <- here::here("figures", paste0("nafo_combined_", region, ".png"))
-
-# Save combined plot (adjust width/height as needed)
-ggsave(
-  filename = png_path,
-  plot = combined_plot,
-  width = 16, height = 12, units = "in", dpi = 600, bg = "white"
-)
 ```

@@ -22,7 +22,7 @@ require(remotes)
 install_github("dempseydanielle/marindicators")
 require(missForest)
 # remotes::install_github("jamiectam/SSdata@<c386abc3887f012cec087db5d00d06a4ff264baa>")
-remotes::install_github("dempseydanielle/SSdata")
+#remotes::install_github("dempseydanielle/SSdata")
 
 ```
 
@@ -1119,7 +1119,7 @@ FP.groups <- data.frame(rbind(c("ALL", "ALL"),
                               c("SKATES", "SKATES.L")))
 names(FP.groups) <- c("group.X", "group.land")
 
-# NAFO Data ------------------------------------------------------------------
+# SS Data ------------------------------------------------------------------
 
 area <- "esswss"
 
@@ -1290,7 +1290,7 @@ ID <- inds$ID
 # these indicators will be filtered out after the imputation
 NA_index <- get_NA_index(inds)
 NA_index_output <- pivot_wider(NA_index, names_from = col_index, values_from = fraction_NA)
-names(NA_index_output)[1] = "NAFO_Area"
+names(NA_index_output)[1] = "SS_Area"
 write.csv(NA_index_output, file = paste(export.filepath, "/fraction_NA_", area, ".csv", sep = ""),
           row.names = FALSE)
 
@@ -1655,3 +1655,8 @@ save(eco_indicators_strat, file=paste(export.filepath, "/eco_indicators_", area,
 
 
 ```
+
+## final step
+
+CSV goes into the R shared drive R:\Science\BIODataSvc\IN\marea
+
