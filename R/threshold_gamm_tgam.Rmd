@@ -1,0 +1,791 @@
+---
+title: "Ecological Indicators Across Pressure Gradients"
+author: "Jamie C. Tam"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# setup
+```{r}
+
+library(tidyverse)
+library(mgcv)
+library(gratia)
+library(ggplot2)
+library(patchwork)
+library(marea)
+```
+
+# ESS regional LONG indicators
+```{r}
+# get data
+data("eco_indicators")
+
+ei_ess<-eco_indicators[eco_indicators@data$region=="ESS"]
+#collect fishing/landings pressures
+pressures_ess<-ei_ess@data |> 
+    select(year,
+           landings_all=landings_ALL_value, 
+           landings_forage=landings_FORAGE.L_value,
+           landings_largepelagic=landings_LARGE_PELAGIC.L_value,
+           landings_flatfish=landings_FLATFISH.L_value,
+           landing_skates=landings_SKATES.L_value,
+           mtl_landings=MeanTL.Landings_value,
+           mti_landings=MTI.Landings_3.25_value,
+           diversity_tspp=DiversityTargetSpp_ALL_value,
+           fp_all=FP_ALL_value,
+           fp_clupeids=FP_CLUPEIDS_value
+           )
+
+#collect environmental pressures
+data("amo")
+data("azmp_bottom_temperature")
+data("nao")
+data("azmp_stratification")
+
+amo_annual <- amo@data |> 
+  group_by(year) |> 
+  summarise(amo_mean = mean(SSTA_value, na.rm = TRUE)) |> 
+  filter(year %in% 1970:2022) |> 
+  select(amo_mean)
+
+nao_annual <- nao@data |> 
+  filter(year %in% 1970:2022) |> 
+  select(nao=anomaly_value)
+
+stratification_annual <-azmp_stratification@data |> 
+  filter(year %in% 1970:2022) |> 
+  select(stratification=mean_value)
+
+salinity_annual <-azmp_salinity@data |> 
+  filter(year %in% 1970:2022) |> 
+  select(salinity=mean_value)
+
+bottom_temp <- azmp_bottom_temperature@data |> 
+    filter(region %in% c("4Vn", "4Vs", "4W"), year %in% 1970:2022) %>%
+    group_by(year) %>%
+    summarise(bottom_temp = mean(mean_value, na.rm = FALSE)) %>%
+    complete(year=1970:2022) |> 
+  mutate(
+    b_temp = zoo::na.approx(bottom_temp, na.rm = FALSE)) |> 
+  select(bottom_temp=b_temp)
+
+#from azmpdata 
+cil_volume <- azmpdata::Derived_Annual_Broadscale |>
+  select(area, year, cold_intermediate_layer_volume) |>
+  filter(area == "scotian_shelf_grid") |>
+  complete(year = 1970:2022) |>
+  arrange(year) |>
+mutate(
+    # convert zeros to NA
+    cold_intermediate_layer_volume = na_if(cold_intermediate_layer_volume, 0),
+    
+    # then impute
+    cil_volume = zoo::na.approx(
+      cold_intermediate_layer_volume,
+      na.rm = FALSE)
+) |> 
+  filter(year %in% 1970:2022) |> 
+  select(cil_volume)
+
+#ice_volume derived from ice.max
+dat<-gslea::EA.query.f(years=1900:2022, variables=c("ice.max"), EARs=1:7)
+
+ ice_max_volume <- dat |> #sum ice.max across all EAR (gulf regions)
+    group_by(year) |>
+    summarise(
+        total_ice_max = sum(value, na.rm = TRUE)
+    )
+ ice_vol<-ice_max_volume |> 
+   mutate(ice_vol=total_ice_max/3) |>  #back of the envelope calculation based on comparisons with benoit's data in azmpdata
+   add_row(year = 1975, ice_vol = NA) |> #missing 1975
+   filter(year>= 1970, year<=2022) |> 
+   select(ice_vol)
+
+env_ess <- dplyr::bind_cols(
+  tibble(year = 1970:2022),
+  bottom_temp,
+  nao_annual,
+  amo_annual,
+  stratification_annual,
+  salinity_annual,
+  ice_vol,
+  cil_volume
+)
+
+
+#bind everything
+pressures_ess <- dplyr::left_join(pressures_ess, env_ess, by = "year")
+
+#remove weird 2021 fpall value >3, probably also weird
+pressures_ess[52,"fp_all"]<-NA
+
+indicators_ess<-ei_ess@data |> 
+    select(year,
+           heips=Heips_ALL_value,
+           lfi=LargeFishIndicator_value,
+           mla=MeanLengthABUNDANCE_value,
+           condition_finfish=CCondition_FINFISH_value,
+           condition_zoopiscivore=CCondition_ZOOPISCIVORE_value, 
+           mls=MeanLifespan_value,
+           biomass_all=BIOMASS_ALL_value,
+           biomass_flatfish=BIOMASS_FLATFISH_value,
+           biomass_gadoids=BIOMASS_GADOIDS_value,
+           biomass_skates=BIOMASS_SKATES_value,
+           biomass_forage=BIOMASS_FORAGE_value,
+           ivi_landings=IVILandings_value
+           )
+mtlc<-mtlc_esswss |> 
+  filter(ID %in% "ESS") |> 
+  select(MeanTLCommunity)
+#join columns
+indicators_ess<-cbind(indicators_ess, mtlc)
+
+
+ess_data <- list(
+  year = 1970:2022,
+  indicators = indicators_ess,
+  pressures = pressures_ess
+)
+
+
+```
+
+# WSS regional LONG indicators
+```{r}
+# get data
+data("eco_indicators")
+
+ei_wss<-eco_indicators[eco_indicators@data$region=="WSS"]
+#collect fishing/landings pressures
+pressures_wss<-ei_wss@data |> 
+    select(year,
+           landings_all=landings_ALL_value, 
+           landings_forage=landings_FORAGE.L_value,
+           landings_largepelagic=landings_LARGE_PELAGIC.L_value,
+           landings_flatfish=landings_FLATFISH.L_value,
+           landing_skates=landings_SKATES.L_value,
+           mtl_landings=MeanTL.Landings_value,
+           mti_landings=MTI.Landings_3.25_value,
+           diversity_tspp=DiversityTargetSpp_ALL_value,
+           fp_all=FP_ALL_value,
+           fp_clupeids=FP_CLUPEIDS_value
+           )
+
+#collect environmental pressures
+data("amo")
+data("azmp_bottom_temperature")
+data("nao")
+data("azmp_salinity")
+
+amo_annual <- amo@data |> 
+  group_by(year) |> 
+  summarise(amo_mean = mean(SSTA_value, na.rm = TRUE)) |> 
+  filter(year %in% 1970:2022) |> 
+  select(amo_mean)
+
+nao_annual <- nao@data |> 
+  filter(year %in% 1970:2022) |> 
+  select(nao=anomaly_value)
+
+salinity_annual <-azmp_salinity@data |> 
+  filter(year %in% 1970:2022) |> 
+  select(salinity=mean_value)
+
+stratification_annual <-azmp_stratification@data |> 
+  filter(year %in% 1970:2022) |> 
+  select(stratification=mean_value)
+
+bottom_temp<-azmp_bottom_temperature@data |> 
+  filter(region %in% "4X") |>
+  filter(year %in% 1970:2022) |> 
+  complete(year=1970:2022) |> 
+  select(bottom_temp=mean_value)
+
+#from azmpdata 
+cil_volume <- azmpdata::Derived_Annual_Broadscale |>
+  select(area, year, cold_intermediate_layer_volume) |>
+  filter(area == "scotian_shelf_grid") |>
+  complete(year = 1970:2022) |>
+  arrange(year) |>
+mutate(
+    # convert zeros to NA
+    cold_intermediate_layer_volume = na_if(cold_intermediate_layer_volume, 0),
+    
+    # then impute
+    cil_volume = zoo::na.approx(
+      cold_intermediate_layer_volume,
+      na.rm = FALSE)
+) |> 
+  filter(year %in% 1970:2022) |> 
+  select(cil_volume)
+
+#ice_volume derived from ice.max
+dat<-gslea::EA.query.f(years=1900:2022, variables=c("ice.max"), EARs=1:7)
+
+ ice_max_volume <- dat |> #sum ice.max across all EAR (gulf regions)
+    group_by(year) |>
+    summarise(
+        total_ice_max = sum(value, na.rm = TRUE)
+    )
+ ice_vol<-ice_max_volume |> 
+   mutate(ice_vol=total_ice_max/3) |>  #back of the envelope calculation based on comparisons with benoit's data in azmpdata
+   add_row(year = 1975, ice_vol = NA) |> #missing 1975
+   filter(year>= 1970, year<=2022) |> 
+   select(ice_vol)
+ 
+ 
+env_wss <- dplyr::bind_cols(
+  tibble(year = 1970:2022),
+  bottom_temp,
+  nao_annual,
+  amo_annual,
+  stratification_annual,
+  salinity_annual,
+  ice_vol,
+  cil_volume
+)
+
+#bind everything
+pressures_wss <- dplyr::left_join(pressures_wss, env_wss, by = "year")
+
+#remove weird 2021 fpall value >3, probably also weird
+pressures_wss[52,"fp_all"]<-NA
+
+indicators_wss<-ei_wss@data |> 
+    select(year,
+           heips=Heips_ALL_value,
+           lfi=LargeFishIndicator_value,
+           mla=MeanLengthABUNDANCE_value,
+           condition_finfish=CCondition_FINFISH_value,
+           condition_zoopiscivore=CCondition_ZOOPISCIVORE_value, 
+           mls=MeanLifespan_value,
+           biomass_all=BIOMASS_ALL_value,
+           biomass_flatfish=BIOMASS_FLATFISH_value,
+           biomass_gadoids=BIOMASS_GADOIDS_value,
+           biomass_skates=BIOMASS_SKATES_value,
+           biomass_forage=BIOMASS_FORAGE_value,
+           ivi_landings=IVILandings_value
+           )
+mtlc<-mtlc_esswss |> 
+  filter(ID %in% "WSS") |> 
+  select(MeanTLCommunity)
+#join columns
+indicators_wss<-cbind(indicators_wss, mtlc)
+
+
+wss_data <- list(
+  year = 1970:2022,
+  indicators = indicators_wss,
+  pressures = pressures_wss
+)
+
+
+```
+
+#set region
+```{r}
+run_full_pipeline <- function(indicators, pressures, region = "ess") {
+
+  pairs <- build_model_pairs(indicators, pressures)
+
+  model_list <- fit_all_models(pairs, indicators, pressures)
+
+  comparison_results <- extract_all_diagnostics(model_list)
+
+  model_selection <- select_best_models(comparison_results)
+
+  threshold_results <- compute_all_thresholds(model_list, model_selection)
+
+  slope_results <- compute_slope_bootstraps(model_list, model_selection)
+
+  combined_plot <- plot_and_save_models(
+    model_selection,
+    model_list,
+    slope_results,
+    threshold_results,
+    region = region,
+    out_dir = here::here("figures", region)
+  )
+
+  return(list(
+    models = model_list,
+    selection = model_selection,
+    thresholds = threshold_results,
+    slopes = slope_results,
+    plot = combined_plot
+  ))
+}
+
+region <- "ess"
+
+fig_dir <- here::here("figures", region)
+res_dir <- here::here("results", region)
+
+dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(res_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+
+# Step 0. global methods
+```{r}
+fit_method <- "REML"
+use_select <- TRUE
+gamma_val  <- 1.4
+
+tolerance <- 0.01
+alpha     <- 0.08
+
+n_grid  <- 300
+min_run <- 5
+```
+
+
+# 1. model pairs
+```{r}
+build_model_pairs <- function(indicators, pressures) {
+  expand.grid(
+    response  = names(indicators),
+    predictor = names(pressures),
+    stringsAsFactors = FALSE
+  )
+}
+```
+
+# 2. AR1 + Model fitting
+```{r}
+estimate_rho <- function(model) {
+  ac <- acf(residuals(model), plot = FALSE, na.action = na.pass)
+  rho <- ac$acf[2]
+  if (!is.finite(rho)) rho <- 0
+  rho
+}
+
+```
+
+# core fit functions
+```{r}
+fit_single_pair <- function(response, predictor, indicators, pressures) {
+
+  df <- data.frame(
+    year = indicators$year,
+    y    = indicators[[response]],
+    x    = pressures[[predictor]]
+  ) |> na.omit()
+
+  if (nrow(df) < 10 || var(df$x) == 0 || var(df$y) == 0) return(NULL)
+
+  df$AR_start <- c(TRUE, diff(df$year) != 1)
+
+  # Initial GAM for rho
+  gam0 <- try(mgcv::gam(y ~ s(x), data = df), silent = TRUE)
+  if (inherits(gam0, "try-error")) return(NULL)
+
+  rho_est <- estimate_rho(gam0)
+
+  # ---- GAM
+  gam_model <- try(
+    mgcv::bam(y ~ s(x),
+              data = df,
+              family = tw(),
+              method = fit_method,
+              select = use_select,
+              gamma  = gamma_val,
+              rho = rho_est,
+              AR.start = df$AR_start,
+              discrete = TRUE),
+    silent = TRUE
+  )
+
+  # ---- GLM
+  glm_model <- try(
+    mgcv::bam(y ~ x,
+              data = df,
+              family = tw(),
+              method = fit_method,
+              rho = rho_est,
+              AR.start = df$AR_start,
+              discrete = TRUE),
+    silent = TRUE
+  )
+
+  # ---- TGAM
+  tgam_model <- try(
+    fit_threshold_gam(
+      df = rename(df, !!response := y, !!predictor := x),
+      resp = response,
+      pres = predictor,
+      rho = rho_est
+    ),
+    silent = TRUE
+  )
+
+  base <- paste(response, predictor, sep = "_vs_")
+
+  list(
+    !!paste0(base, "_GAM")  := if (!inherits(gam_model, "try-error")) gam_model else NULL,
+    !!paste0(base, "_GLM")  := if (!inherits(glm_model, "try-error")) glm_model else NULL,
+    !!paste0(base, "_TGAM") := if (!inherits(tgam_model, "try-error")) tgam_model else NULL
+  )
+}
+
+fit_all_models <- function(pairs, indicators, pressures) {
+
+  out <- lapply(seq_len(nrow(pairs)), function(i) {
+
+    res <- fit_single_pair(
+      pairs$response[i],
+      pairs$predictor[i],
+      indicators,
+      pressures
+    )
+
+    res[!sapply(res, is.null)]
+  })
+
+  do.call(c, out)
+}
+```
+
+# 3. Diagnostic Extractions
+```{r}
+extract_model_metrics <- function(model_name, model) {
+
+  smry <- summary(model)
+
+  parts <- strsplit(model_name, "_vs_")[[1]]
+  response  <- parts[1]
+  predictor <- sub("_.*$", "", parts[2])
+  model_type <- sub("^.*_", "", parts[2])
+
+  data.frame(
+    Response   = response,
+    Predictor  = predictor,
+    Model_Type = model_type,
+    AIC        = AIC(model),
+    R_squared  = smry$r.sq,
+    EDF        = sum(model$edf),
+    Score      = model$gcv.ubre,
+    p_value    = tryCatch({
+      if (model_type == "GLM") smry$p.table[2, 4]
+      else if (!is.null(smry$s.table)) smry$s.table[1, 4]
+      else NA
+    }, error = function(e) NA),
+    Threshold  = if (model_type == "TGAM") attr(model, "threshold") else NA,
+    rho        = if (!is.null(model$rho)) model$rho else NA,
+    stringsAsFactors = FALSE
+  )
+}
+
+extract_all_diagnostics <- function(model_list) {
+  bind_rows(
+    lapply(names(model_list), function(nm) {
+      tryCatch(extract_model_metrics(nm, model_list[[nm]]), error = function(e) NULL)
+    })
+  )
+}
+
+
+```
+
+# 4. model selection
+```{r}
+select_best_models <- function(df) {
+
+  df %>%
+    group_by(Response, Predictor) %>%
+    mutate(
+      best_score = min(Score[Model_Type != "TGAM"], na.rm = TRUE),
+      tgam_score = ifelse(Model_Type == "TGAM", Score, NA),
+      tgam_p = ifelse(Model_Type == "TGAM", p_value, NA),
+      tgam_within_tol = tgam_score <= best_score * (1 + tolerance),
+      tgam_sig = tgam_p < alpha,
+      prefer_tgam = tgam_sig | tgam_within_tol
+    ) %>%
+    arrange(desc(prefer_tgam & Model_Type == "TGAM"), Score) %>%
+    slice(1) %>%
+    ungroup()
+}
+
+```
+
+# 5. Threshold module
+```{r}
+compute_all_thresholds <- function(model_list, model_selection) {
+
+  results <- lapply(seq_len(nrow(model_selection)), function(i) {
+
+    row <- model_selection[i, ]
+    key <- paste0(row$Response, "_vs_", row$Predictor, "_", row$Model_Type)
+    model <- model_list[[key]]
+
+    if (row$Model_Type == "TGAM") {
+      return(data.frame(
+        Model = key,
+        Threshold = attr(model, "threshold")
+      ))
+    }
+
+    if (row$Model_Type == "GAM") {
+      cr <- robust_gam_crossings(model, row$Predictor)
+      return(data.frame(
+        Model = key,
+        Crossing = paste(cr$Derivative_Zero_Crossing, collapse = ", ")
+      ))
+    }
+
+    NULL
+  })
+
+  bind_rows(results)
+}
+```
+
+# 6. Slope bootstrap model
+```{r}
+compute_slope_bootstraps <- function(model_list, model_selection) {
+
+  res <- list()
+
+  for (i in seq_len(nrow(model_selection))) {
+
+    row <- model_selection[i, ]
+    if (row$Model_Type != "GAM") next
+
+    key <- paste0(row$Response, "_vs_", row$Predictor, "_GAM")
+
+    slope_df <- bootstrap_gam_slope(
+      model_list[[key]],
+      predictor = row$Predictor,
+      B = 200,
+      n_grid = 300
+    )
+
+    res[[key]] <- slope_df
+  }
+
+  bind_rows(res)
+}
+```
+
+# 7 best model table 
+```{r}
+build_best_models_table <- function(selection, threshold_results) {
+
+  selection %>%
+    mutate(Model = paste0(Response, "_vs_", Predictor, "_", Model_Type)) %>%
+    left_join(threshold_results, by = "Model") %>%
+    arrange(Response, Predictor)
+}
+
+```
+
+# 8. plotting
+```{r}
+plot_and_save_models <- function(selection, model_list,
+                                 slope_df = NULL,
+                                 threshold_df = NULL,
+                                 region = "region",
+                                 out_dir = "figures") {
+
+  dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+  plot_list <- list()
+
+  for (i in seq_len(nrow(selection))) {
+
+    row <- selection[i, ]
+    response   <- row$Response
+    predictor  <- row$Predictor
+    model_type <- row$Model_Type
+
+    key <- paste0(response, "_vs_", predictor, "_", model_type)
+    model <- model_list[[key]]
+    if (is.null(model)) next
+
+    # --- prediction grid ---
+    xvals <- seq(min(model$model[[predictor]], na.rm = TRUE),
+                 max(model$model[[predictor]], na.rm = TRUE),
+                 length.out = 300)
+
+    nd <- setNames(data.frame(xvals), predictor)
+
+    # TGAM hinge
+    thr <- NA_real_
+    if (model_type == "TGAM") {
+      thr <- attr(model, "threshold")
+      nd$hinge <- pmax(0, nd[[predictor]] - thr)
+    }
+
+    # Predictions
+    nd$fit <- predict(model, newdata = nd, type = "response")
+
+    # --- base plot ---
+    p <- ggplot(model$model,
+                aes(x = .data[[predictor]],
+                    y = .data[[response]])) +
+      geom_point(alpha = 0.5) +
+      geom_line(data = nd,
+                aes(x = .data[[predictor]], y = fit),
+                linewidth = 1.1,
+                color = "black") +
+      theme_minimal(base_size = 11) +
+      labs(
+        title = paste(response, "~", predictor),
+        subtitle = paste("Model:", model_type),
+        x = predictor,
+        y = response
+      )
+
+    # --- TGAM threshold line ---
+    if (model_type == "TGAM" && is.finite(thr)) {
+      p <- p + geom_vline(xintercept = thr,
+                          linetype = "dashed",
+                          color = "red")
+    }
+
+    # --- GAM slope overlay (optional shading) ---
+    if (!is.null(slope_df)) {
+      sd <- slope_df %>% dplyr::filter(Model == key)
+      if (nrow(sd) > 0) {
+        sig <- with(sd, slope_q025 > 0 | slope_q975 < 0)
+        if (any(sig, na.rm = TRUE)) {
+          p <- p +
+            geom_ribbon(
+              data = data.frame(x = sd[[predictor]], sig = sig),
+              aes(x = x, ymin = -Inf, ymax = Inf),
+              inherit.aes = FALSE,
+              alpha = 0.05,
+              fill = "orange"
+            )
+        }
+      }
+    }
+
+    # ------------ SAVE INDIVIDUAL PLOT ------------
+    file_name <- paste0(
+      region, "_",
+      response, "_vs_", predictor, "_",
+      model_type, ".png"
+    )
+
+    ggsave(
+      filename = file.path(out_dir, file_name),
+      plot = p,
+      width = 5, height = 4,
+      dpi = 400
+    )
+
+    plot_list[[key]] <- p
+  }
+
+  # ------------ COMBINED GRID ------------
+  combined_plot <- patchwork::wrap_plots(plot_list)
+
+  ggsave(
+    filename = file.path(out_dir, paste0("combined_", region, ".png")),
+    plot = combined_plot,
+    width = 16, height = 12,
+    dpi = 500
+  )
+
+  return(combined_plot)
+}
+
+plot_and_save_derivatives <- function(selection,
+                                      slope_df,
+                                      region = "region",
+                                      out_dir = "figures") {
+
+  if (is.null(slope_df) || nrow(slope_df) == 0) return(NULL)
+
+  dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+  plot_list <- list()
+
+  for (i in seq_len(nrow(selection))) {
+
+    row <- selection[i, ]
+    if (row$Model_Type != "GAM") next
+
+    key <- paste0(row$Response, "_vs_", row$Predictor, "_GAM")
+
+    sd <- slope_df %>% dplyr::filter(Model == key)
+    if (nrow(sd) == 0) next
+
+    p <- ggplot(sd,
+                aes(x = .data[[row$Predictor]], y = slope_med)) +
+      geom_ribbon(aes(ymin = slope_q025, ymax = slope_q975),
+                  fill = "steelblue", alpha = 0.25) +
+      geom_line(color = "steelblue4") +
+      geom_hline(yintercept = 0, linetype = "dashed") +
+      theme_minimal() +
+      labs(
+        title = paste0(row$Response, " ~ ", row$Predictor, " (slope)"),
+        y = "Derivative",
+        x = row$Predictor
+      )
+
+    file_name <- paste0(
+      region, "_deriv_",
+      row$Response, "_vs_", row$Predictor, ".png"
+    )
+
+    ggsave(
+      filename = file.path(out_dir, file_name),
+      plot = p,
+      width = 5, height = 4,
+      dpi = 400
+    )
+
+    plot_list[[key]] <- p
+  }
+
+  if (length(plot_list)) {
+    grid <- patchwork::wrap_plots(plot_list)
+
+    ggsave(
+      file.path(out_dir, paste0("derivatives_", region, ".png")),
+      grid,
+      width = 16, height = 12,
+      dpi = 500
+    )
+
+    return(grid)
+  }
+}
+
+combined_plot <- plot_and_save_models(
+  model_selection,
+  model_list,
+  slope_results,
+  threshold_results,
+  region = region,
+  out_dir = here::here("figures", region)
+)
+
+deriv_plot <- plot_and_save_derivatives(
+  model_selection,
+  slope_results,
+  region = region,
+  out_dir = here::here("figures", region)
+)
+
+```
+
+# 9. save results
+```{r}
+path <- here::here("results", paste0("ei_threshold_results_", region, ".RData"))
+
+save_results <- function(path) {
+
+  save(
+    best_models_table,
+    model_selection,
+    comparison_results,
+    model_list,
+    file = path
+  )
+}
+```
+
