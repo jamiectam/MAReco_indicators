@@ -28,10 +28,10 @@ data("eco_indicators")
 #separate by region
 # indicators used in Irvine et al. 2025 reasoning was that they didn't use any indicators calculated that had landings (not available at set level), MargalefRichness_ALL, Heips_ALL, LargeFishIndicator, MeanLengthAbundance, Biomass_Piscivore, CCondition_Finfish, CCondition_MBenthivore, CCondition_Zoopiscivore, CCondition_Planktivores, CCondition_LBenthivore, CVBiomass, MeanLifespan, BiomassTL2, Biomass_Skates, Biomass_All, Biomass_Flatfish, Biomass_Gadoids, Biomass_invertebrates
 
-nafo_ei_4VN<-eco_indicators[eco_indicators@data$region=="4VN"]
-nafo_ei_4VS<-eco_indicators[eco_indicators@data$region=="4VS"]
-nafo_ei_4W<-eco_indicators[eco_indicators@data$region=="4W"]
-nafo_ei_4X<-eco_indicators[eco_indicators@data$region=="4X"]
+nafo_ei_4VN<-ea.subset(eco_indicators, "region", "4VN")
+nafo_ei_4VS<-ea.subset(eco_indicators, "region", "4VS")
+nafo_ei_4W<-ea.subset(eco_indicators, "region", "4W")
+nafo_ei_4X<-ea.subset(eco_indicators, "region", "4X")
 nafo_ind_4X<-nafo_ei_4X@data |> 
     select(margalefrichness=MargalefRichness_ALL_value,
            heips=Heips_ALL_value,
