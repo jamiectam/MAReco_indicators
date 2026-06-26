@@ -7,280 +7,20 @@ library(gratia)
 library(ggplot2)
 library(patchwork)
 library(marea)
+# library(gslea)
+# library(azmpdata)
 ```
 
-# ESS regional LONG indicators
+#load saved data
 ```{r}
-# get data
-data("eco_indicators")
+load("D:/Work projects/MAReco_indicators/data_thresholds/ess_data_longts.Rdata")
 
-ei_ess<-eco_indicators[eco_indicators@data$region=="ESS"]
-#collect fishing/landings pressures
-pressures_ess<-ei_ess@data |> 
-    select(year,
-           landings_all=landings_ALL_value, 
-           landings_forage=landings_FORAGE.L_value,
-           landings_largepelagic=landings_LARGE_PELAGIC.L_value,
-           landings_flatfish=landings_FLATFISH.L_value,
-           landing_skates=landings_SKATES.L_value,
-           mtl_landings=MeanTL.Landings_value,
-           mti_landings=MTI.Landings_3.25_value,
-           diversity_tspp=DiversityTargetSpp_ALL_value,
-           fp_all=FP_ALL_value,
-           fp_clupeids=FP_CLUPEIDS_value
-           )
-
-#collect environmental pressures
-data("amo")
-data("azmp_bottom_temperature")
-data("nao")
-data("azmp_stratification")
-
-amo_annual <- amo@data |> 
-  group_by(year) |> 
-  summarise(amo_mean = mean(SSTA_value, na.rm = TRUE)) |> 
-  filter(year %in% 1970:2022) |> 
-  select(amo_mean)
-
-nao_annual <- nao@data |> 
-  filter(year %in% 1970:2022) |> 
-  select(nao=anomaly_value)
-
-stratification_annual <-azmp_stratification@data |> 
-  filter(year %in% 1970:2022) |> 
-  select(stratification=mean_value)
-
-salinity_annual <-azmp_salinity@data |> 
-  filter(year %in% 1970:2022) |> 
-  select(salinity=mean_value)
-
-bottom_temp <- azmp_bottom_temperature@data |> 
-    filter(region %in% c("4Vn", "4Vs", "4W"), year %in% 1970:2022) %>%
-    group_by(year) %>%
-    summarise(bottom_temp = mean(mean_value, na.rm = FALSE)) %>%
-    complete(year=1970:2022) |> 
-  mutate(
-    b_temp = zoo::na.approx(bottom_temp, na.rm = FALSE)) |> 
-  select(bottom_temp=b_temp)
-
-#from azmpdata 
-cil_volume <- azmpdata::Derived_Annual_Broadscale |>
-  select(area, year, cold_intermediate_layer_volume) |>
-  filter(area == "scotian_shelf_grid") |>
-  complete(year = 1970:2022) |>
-  arrange(year) |>
-mutate(
-    # convert zeros to NA
-    cold_intermediate_layer_volume = na_if(cold_intermediate_layer_volume, 0),
-    
-    # then impute
-    cil_volume = zoo::na.approx(
-      cold_intermediate_layer_volume,
-      na.rm = FALSE)
-) |> 
-  filter(year %in% 1970:2022) |> 
-  select(cil_volume)
-
-#ice_volume derived from ice.max
-dat<-gslea::EA.query.f(years=1900:2022, variables=c("ice.max"), EARs=1:7)
-
- ice_max_volume <- dat |> #sum ice.max across all EAR (gulf regions)
-    group_by(year) |>
-    summarise(
-        total_ice_max = sum(value, na.rm = TRUE)
-    )
- ice_vol<-ice_max_volume |> 
-   mutate(ice_vol=total_ice_max/3) |>  #back of the envelope calculation based on comparisons with benoit's data in azmpdata
-   add_row(year = 1975, ice_vol = NA) |> #missing 1975
-   filter(year>= 1970, year<=2022) |> 
-   select(ice_vol)
-
-env_ess <- dplyr::bind_cols(
-  tibble(year = 1970:2022),
-  bottom_temp,
-  nao_annual,
-  amo_annual,
-  stratification_annual,
-  salinity_annual,
-  ice_vol,
-  cil_volume
-)
-
-
-#bind everything
-pressures_ess <- dplyr::left_join(pressures_ess, env_ess, by = "year")
-
-#remove weird 2021 fpall value >3, probably also weird
-pressures_ess[52,"fp_all"]<-NA
-
-indicators_ess<-ei_ess@data |> 
-    select(year,
-           heips=Heips_ALL_value,
-           lfi=LargeFishIndicator_value,
-           mla=MeanLengthABUNDANCE_value,
-           condition_finfish=CCondition_FINFISH_value,
-           condition_zoopiscivore=CCondition_ZOOPISCIVORE_value, 
-           mls=MeanLifespan_value,
-           biomass_all=BIOMASS_ALL_value,
-           biomass_flatfish=BIOMASS_FLATFISH_value,
-           biomass_gadoids=BIOMASS_GADOIDS_value,
-           biomass_skates=BIOMASS_SKATES_value,
-           biomass_forage=BIOMASS_FORAGE_value,
-           ivi_landings=IVILandings_value
-           )
-mtlc<-mtlc_esswss |> 
-  filter(ID %in% "ESS") |> 
-  select(MeanTLCommunity)
-#join columns
-indicators_ess<-cbind(indicators_ess, mtlc)
-
-
-ess_data <- list(
-  year = 1970:2022,
-  indicators = indicators_ess,
-  pressures = pressures_ess
-)
-
-
+load("D:/Work projects/MAReco_indicators/data_thresholds/wss_data_longts.Rdata")
 ```
 
-# WSS regional LONG indicators
-```{r}
-# get data
-data("eco_indicators")
-
-ei_wss<-eco_indicators[eco_indicators@data$region=="WSS"]
-#collect fishing/landings pressures
-pressures_wss<-ei_wss@data |> 
-    select(year,
-           landings_all=landings_ALL_value, 
-           landings_forage=landings_FORAGE.L_value,
-           landings_largepelagic=landings_LARGE_PELAGIC.L_value,
-           landings_flatfish=landings_FLATFISH.L_value,
-           landing_skates=landings_SKATES.L_value,
-           mtl_landings=MeanTL.Landings_value,
-           mti_landings=MTI.Landings_3.25_value,
-           diversity_tspp=DiversityTargetSpp_ALL_value,
-           fp_all=FP_ALL_value,
-           fp_clupeids=FP_CLUPEIDS_value
-           )
-
-#collect environmental pressures
-data("amo")
-data("azmp_bottom_temperature")
-data("nao")
-data("azmp_salinity")
-
-amo_annual <- amo@data |> 
-  group_by(year) |> 
-  summarise(amo_mean = mean(SSTA_value, na.rm = TRUE)) |> 
-  filter(year %in% 1970:2022) |> 
-  select(amo_mean)
-
-nao_annual <- nao@data |> 
-  filter(year %in% 1970:2022) |> 
-  select(nao=anomaly_value)
-
-salinity_annual <-azmp_salinity@data |> 
-  filter(year %in% 1970:2022) |> 
-  select(salinity=mean_value)
-
-stratification_annual <-azmp_stratification@data |> 
-  filter(year %in% 1970:2022) |> 
-  select(stratification=mean_value)
-
-bottom_temp<-azmp_bottom_temperature@data |> 
-  filter(region %in% "4X") |>
-  filter(year %in% 1970:2022) |> 
-  complete(year=1970:2022) |> 
-  select(bottom_temp=mean_value)
-
-#from azmpdata 
-cil_volume <- azmpdata::Derived_Annual_Broadscale |>
-  select(area, year, cold_intermediate_layer_volume) |>
-  filter(area == "scotian_shelf_grid") |>
-  complete(year = 1970:2022) |>
-  arrange(year) |>
-mutate(
-    # convert zeros to NA
-    cold_intermediate_layer_volume = na_if(cold_intermediate_layer_volume, 0),
-    
-    # then impute
-    cil_volume = zoo::na.approx(
-      cold_intermediate_layer_volume,
-      na.rm = FALSE)
-) |> 
-  filter(year %in% 1970:2022) |> 
-  select(cil_volume)
-
-#ice_volume derived from ice.max
-dat<-gslea::EA.query.f(years=1900:2022, variables=c("ice.max"), EARs=1:7)
-
- ice_max_volume <- dat |> #sum ice.max across all EAR (gulf regions)
-    group_by(year) |>
-    summarise(
-        total_ice_max = sum(value, na.rm = TRUE)
-    )
- ice_vol<-ice_max_volume |> 
-   mutate(ice_vol=total_ice_max/3) |>  #back of the envelope calculation based on comparisons with benoit's data in azmpdata
-   add_row(year = 1975, ice_vol = NA) |> #missing 1975
-   filter(year>= 1970, year<=2022) |> 
-   select(ice_vol)
- 
- 
-env_wss <- dplyr::bind_cols(
-  tibble(year = 1970:2022),
-  bottom_temp,
-  nao_annual,
-  amo_annual,
-  stratification_annual,
-  salinity_annual,
-  ice_vol,
-  cil_volume
-)
-
-#bind everything
-pressures_wss <- dplyr::left_join(pressures_wss, env_wss, by = "year")
-
-#remove weird 2021 fpall value >3, probably also weird
-pressures_wss[52,"fp_all"]<-NA
-
-indicators_wss<-ei_wss@data |> 
-    select(year,
-           heips=Heips_ALL_value,
-           lfi=LargeFishIndicator_value,
-           mla=MeanLengthABUNDANCE_value,
-           condition_finfish=CCondition_FINFISH_value,
-           condition_zoopiscivore=CCondition_ZOOPISCIVORE_value, 
-           mls=MeanLifespan_value,
-           biomass_all=BIOMASS_ALL_value,
-           biomass_flatfish=BIOMASS_FLATFISH_value,
-           biomass_gadoids=BIOMASS_GADOIDS_value,
-           biomass_skates=BIOMASS_SKATES_value,
-           biomass_forage=BIOMASS_FORAGE_value,
-           ivi_landings=IVILandings_value
-           )
-mtlc<-mtlc_esswss |> 
-  filter(ID %in% "WSS") |> 
-  select(MeanTLCommunity)
-#join columns
-indicators_wss<-cbind(indicators_wss, mtlc)
-
-
-wss_data <- list(
-  year = 1970:2022,
-  indicators = indicators_wss,
-  pressures = pressures_wss
-)
-
-
-```
 
 # set region and model selection rules 
 ```{r}
-
-# --- Region label (used in filenames) ---
-region <- "ess"
 
 # --- Global model options (consistent across GLM/GAM/tGAM) ---
 fit_method <- "REML"
@@ -299,6 +39,7 @@ n_grid       <- 300
 min_run      <- 5
 trim_bd      <- 0.05  # for max-curvature edge trim
 
+
 # ---- Helper: robust column accessor (gratia version-proof) ----*maybe move to .R*
 get_col <- function(df, candidates) {
   for (nm in candidates) if (nm %in% names(df)) return(df[[nm]])
@@ -311,6 +52,7 @@ build_grid <- function(model, pred, n = 400) {
   rng <- range(model$model[[pred]], na.rm = TRUE)
   setNames(data.frame(seq(rng[1], rng[2], length.out = n)), pred)
 }
+
 
 # ---- Effective thresholds on a GAM ----
 effective_derivative_onset <- function(model, predictor, min_run = 5, n = 400) {
@@ -427,7 +169,7 @@ fit_threshold_gam <- function(df, resp, pres,
       silent = TRUE
     )
     if (inherits(fit, "try-error")) next
-    score <- fit$gcv.ubre
+    score <- fit$AIC(fit)
     if (!is.finite(score)) next
     if (score < best_score) { best <- fit; best_score <- score; best_c <- c0 }
   }
@@ -553,11 +295,19 @@ slope_zero_crossings <- function(slope_df, xvar) {
 }
 ```
 
-# Step 1. Fit GLM GAM threshold GAM with grid search for c
+# indicator pressure setup
+```{r}
+# --- Region label (used in filenames) ---
+region <- "ess_strfunc"
+
+indicators <- ess_data_longts$indicators |> 
+  select(lfi, mla, condition_finfish, condition_zoopiscivore)
+pressures  <- ess_data_longts$pressures |> select(-year)
+```
+
+# Step 1. Fit GLM GAM threshold GAM with grid search for correlations
 ```{r}
 # ---- Step 1: Fit models ----
-indicators <- nafo_ind_4X
-pressures  <- nafo_pres_4X
 
 model_list <- list()
 
@@ -595,6 +345,7 @@ for (a_col in names(indicators)) {
 
 ```
 
+
 #Step 2. Extract model diagonstics 
 ```{r}
 # ---- Step 2: Diagnostics ----
@@ -608,8 +359,8 @@ for (model_name in names(model_list)) {
     parts <- strsplit(model_name, "_vs_")[[1]]
     response <- parts[1]
     predictor_and_type <- parts[2]
-    predictor <- sub("_.*$", "", predictor_and_type)
-    model_type <- sub("^.*_", "", predictor_and_type)
+    predictor <- sub("_(GAM|GLM|TGAM)$", "", predictor_and_type)
+    model_type <- sub("^.*_(GAM|GLM|TGAM)$", "\\1", predictor_and_type)
 
     aic_val   <- AIC(model)
     r_squared <- smry$r.sq
@@ -662,25 +413,50 @@ print(comparison_results)
 
 # Step 3. Model Selection
 ```{r}
-# ---- Step 3: Model selection ----
+# ---- Step 3: Strict single-model selection ----
+
 model_selection <- comparison_results %>%
   filter(Model_Type %in% c("GLM", "GAM", "TGAM")) %>%
   group_by(Response, Predictor) %>%
   mutate(
-    best_non_tgam_gcv = suppressWarnings(min(GCV_UBRE[Model_Type != "TGAM"], na.rm = TRUE)),
-    tgam_gcv          = ifelse(Model_Type == "TGAM", GCV_UBRE, NA_real_),
-    tgam_p            = ifelse(Model_Type == "TGAM", p_value,  NA_real_),
-    tgam_exists       = any(Model_Type == "TGAM"),
-    tgam_gcv_any      = suppressWarnings(min(tgam_gcv, na.rm = TRUE)),
-    tgam_p_any        = suppressWarnings(min(tgam_p,  na.rm = TRUE)),
-    tgam_within_tol   = ifelse(is.finite(best_non_tgam_gcv) & is.finite(tgam_gcv_any),
-                               tgam_gcv_any <= best_non_tgam_gcv * (1 + tolerance), FALSE),
-    tgam_hinge_sig    = ifelse(is.finite(tgam_p_any), tgam_p_any < alpha, FALSE),
-    prefer_tgam       = tgam_exists & (tgam_hinge_sig | tgam_within_tol)
+    # Identify best GAM/GLM
+    best_non_tgam_aic = min(AIC[Model_Type != "TGAM"], na.rm = TRUE),
+
+    # Identify best TGAM
+    tgam_aic = ifelse(Model_Type == "TGAM", AIC, NA_real_),
+    tgam_p   = ifelse(Model_Type == "TGAM", p_value, NA_real_),
+
+    tgam_aic_best = min(tgam_aic, na.rm = TRUE),
+    tgam_p_best   = min(tgam_p, na.rm = TRUE),
+
+    # Compute delta AIC
+    delta_aic = tgam_aic_best - best_non_tgam_aic,
+
+    # Decision: only accept TGAM if justified
+    pick_tgam = !is.infinite(tgam_aic_best) & (
+      delta_aic <= -2 |
+      (delta_aic <= 2 & tgam_p_best < alpha)
+    )
   ) %>%
-  arrange(desc(prefer_tgam & Model_Type == "TGAM"), GCV_UBRE, AIC) %>%
-  slice(1) %>%
-  ungroup()
+
+  summarise(
+    # ✅ pick ONE model per pair
+    Model_Type = if (any(pick_tgam, na.rm = TRUE)) {
+      "TGAM"
+    } else {
+      Model_Type[which.min(AIC[Model_Type != "TGAM"])]
+    },
+
+    # ✅ grab row corresponding to selected model
+    AIC        = AIC[Model_Type == cur_data()$Model_Type][1],
+    R_squared  = R_squared[Model_Type == cur_data()$Model_Type][1],
+    EDF        = EDF[Model_Type == cur_data()$Model_Type][1],
+    GCV_UBRE   = GCV_UBRE[Model_Type == cur_data()$Model_Type][1],
+    p_value    = p_value[Model_Type == cur_data()$Model_Type][1],
+
+    .groups = "drop"
+  )
+
 
 print(model_selection)
 ```
@@ -778,8 +554,8 @@ for (model_name in names(model_list)) {
   parts <- strsplit(model_name, "_vs_")[[1]]
   response <- parts[1]
   predictor_and_type <- parts[2]
-  predictor <- sub("_.*$", "", predictor_and_type)
-  model_type <- sub("^.*_", "", predictor_and_type)
+  predictor <- sub("_(GAM|GLM|TGAM)$", "", predictor_and_type)
+  model_type <- sub("^.*_(GAM|GLM|TGAM)$", "\\1", predictor_and_type)
   
   # --- A) TGAM: extract threshold
   if (identical(model_type, "TGAM")) {
@@ -850,7 +626,7 @@ print(thresholds_all_df)
 
 # Step 5. Compute slope CIs for selected models
 ```{r}
-# ---- Step 4b: Bootstrap slopes for selected GAMs ----
+# ---- Step 5: Bootstrap slopes for selected GAMs ----
 selected_only <- TRUE #select FALSE for all models
 
 target_gams <- if (selected_only) {
@@ -909,24 +685,26 @@ print(gam_slope_boot_summary_df)
 
 #Step 6.Build best model tables
 ```{r}
-# ---- Step 5: Best models table ----
-collapse_crossings <- function(model_key, crossings_df) {
-  if (is.null(crossings_df) || nrow(crossings_df) == 0) return(NA_character_)
-  vals <- crossings_df$Derivative_Zero_Crossing[crossings_df$Model == model_key]
-  if (length(vals) == 0) return(NA_character_)
-  paste(signif(vals, 4), collapse = ", ")
-}
-
 best_models_table <- model_selection %>%
   rowwise() %>%
   mutate(
     Model_Key = paste0(Response, "_vs_", Predictor, "_", Model_Type),
+
     Threshold = if (Model_Type == "TGAM") {
-      thr <- try(attr(model_list[[Model_Key]], "threshold"), silent = TRUE)
-      if (inherits(thr, "try-error")) NA_real_ else as.numeric(thr)
+      if (!Model_Key %in% names(model_list)) {
+        NA_real_
+      } else {
+        thr <- attr(model_list[[Model_Key]], "threshold")
+        if (is.null(thr) || !is.finite(thr)) NA_real_ else as.numeric(thr)
+      }
     } else NA_real_,
+
     Derivative_Zero_Crossings = if (Model_Type == "GAM") {
-      collapse_crossings(Model_Key, crossings_df)
+      if (exists("crossings_df") && nrow(crossings_df) > 0) {
+        collapse_crossings(Model_Key, crossings_df)
+      } else {
+        NA_character_
+      }
     } else NA_character_
   ) %>%
   ungroup() %>%
@@ -999,65 +777,97 @@ unified_thresholds <- model_selection %>%
 
 print(unified_thresholds)
 ```
-
-
-#Step 8. Plotting 
+# Step 8. Plotting
 ```{r}
-# ---- Step 6: Plot selected models (GLM blue; GAM/TGAM black; TGAM threshold in red) ----
+# ---- Step 8: Plot ONLY selected best models (organized by pressure) ----
 library(ggplot2)
 library(patchwork)
+library(dplyr)
 library(here)
-# (You already loaded dplyr earlier)
 
 plot_list <- list()
 
-for (i in seq_len(nrow(model_selection))) {
-  row <- model_selection[i, ]
-  response   <- row$Response
-  predictor  <- row$Predictor
-  model_type <- row$Model_Type
-  key        <- paste0(response, "_vs_", predictor, "_", model_type)
-  model      <- model_list[[key]]
+# ✅ Build plotting table and sort by pressure first
+# plot_df <- model_selection %>%
+#   mutate(
+#     Model_Key = paste0(Response, "_vs_", Predictor, "_", Model_Type)
+#   ) %>%
+#   arrange(Predictor, Response)
+
+plot_df <- model_selection %>%
+  filter(!is.na(p_value), p_value < alpha) %>%   # ✅ KEEP ONLY SIGNIFICANT
+  mutate(
+    Model_Key = paste0(Response, "_vs_", Predictor, "_", Model_Type)
+  ) %>%
+  arrange(Predictor, Response)
+
+
+selected_keys <- unique(plot_df$Model_Key)
+
+# ✅ Loop through selected best models only
+for (key in selected_keys) {
+
+  model <- model_list[[key]]
   if (is.null(model)) next
 
-  # 1) Build prediction grid
+  # --- Parse components ---
+  parts <- strsplit(key, "_vs_")[[1]]
+  response <- parts[1]
+  predictor_and_type <- parts[2]
+  predictor <- sub("_(GAM|GLM|TGAM)$", "", predictor_and_type)
+  model_type <- sub("^.*_(GAM|GLM|TGAM)$", "\\1", predictor_and_type)
+
+  # --- Build prediction grid ---
   x_min <- min(model$model[[predictor]], na.rm = TRUE)
   x_max <- max(model$model[[predictor]], na.rm = TRUE)
+
+  if (!is.finite(x_min) || !is.finite(x_max) || x_min == x_max) next
+
   pred_vals <- seq(x_min, x_max, length.out = 300)
   pred_df <- setNames(data.frame(pred_vals), predictor)
 
-  # 2) If TGAM, add hinge using chosen threshold
+  # --- TGAM hinge ---
   thr <- NA_real_
   if (model_type == "TGAM") {
     thr <- attr(model, "threshold")
     pred_df$hinge <- pmax(0, pred_df[[predictor]] - thr)
   }
 
-  # 3) Predictions (response scale) + approximate CI via link ± 1.96*SE
+  # --- Predictions ---
   pred_df$fit <- predict(model, newdata = pred_df, type = "response")
-  pred_conf   <- predict(model, newdata = pred_df, type = "link", se.fit = TRUE)
-  pred_df$se  <- pred_conf$se.fit
+
+  pred_conf <- predict(model, newdata = pred_df, type = "link", se.fit = TRUE)
+  pred_df$se <- pred_conf$se.fit
+
   pred_df$upper <- model$family$linkinv(pred_conf$fit + 1.96 * pred_df$se)
   pred_df$lower <- model$family$linkinv(pred_conf$fit - 1.96 * pred_df$se)
 
-  # 4) Color palette
-  glm_col  <- "blue"       # BLUE for GLMs
-  gam_col  <- "darkgreen"      # GREEN for GAMs
-  tgam_col <- "black"      # BLACK for tGAM fits
-  thr_col  <- "red"        # RED for threshold & overlays
+  # --- Colours ---
+  glm_col  <- "blue"
+  gam_col  <- "darkgreen"
+  tgam_col <- "black"
+  thr_col  <- "red"
 
-  # 5) Base plot with points (use tidy-eval via .data pronoun)
+  # --- Base plot ---
   p <- ggplot() +
     geom_point(
       data = model$model,
       aes(x = .data[[predictor]], y = .data[[response]]),
       alpha = 0.5
     ) +
-    labs(x = predictor, y = response) +
-    theme_minimal()
+    labs(
+      # title = paste(response, "~", predictor),
+      # subtitle = paste("Best model:", model_type),
+      x = predictor,
+      y = response
+    ) +
+    theme_minimal(base_size = 11)
 
-  # 6) Type-specific layers (replace size= with linewidth=)
+  # =====================
+  # GLM
+  # =====================
   if (model_type == "GLM") {
+
     p <- p +
       geom_line(
         data = pred_df,
@@ -1066,11 +876,18 @@ for (i in seq_len(nrow(model_selection))) {
       ) +
       geom_ribbon(
         data = pred_df,
-        aes(x = .data[[predictor]], ymin = .data[["lower"]], ymax = .data[["upper"]]),
+        aes(x = .data[[predictor]],
+            ymin = .data[["lower"]],
+            ymax = .data[["upper"]]),
         fill = glm_col, alpha = 0.2
       )
+  }
 
-  } else if (model_type == "GAM") {
+  # =====================
+  # GAM
+  # =====================
+  if (model_type == "GAM") {
+
     p <- p +
       geom_line(
         data = pred_df,
@@ -1079,70 +896,53 @@ for (i in seq_len(nrow(model_selection))) {
       ) +
       geom_ribbon(
         data = pred_df,
-        aes(x = .data[[predictor]], ymin = .data[["lower"]], ymax = .data[["upper"]]),
+        aes(x = .data[[predictor]],
+            ymin = .data[["lower"]],
+            ymax = .data[["upper"]]),
         fill = gam_col, alpha = 0.2
       )
 
-    # Optional: add robust derivative zero-crossings if computed earlier
-    if (exists("crossings_df") && !is.null(crossings_df) && nrow(crossings_df) > 0) {
+    # ✅ Derivative zero-crossings
+    if (exists("crossings_df") && nrow(crossings_df) > 0) {
       crossings <- crossings_df$Derivative_Zero_Crossing[crossings_df$Model == key]
+
       if (length(crossings) > 0) {
         for (v in crossings) {
           if (is.finite(v)) {
-            p <- p + geom_vline(xintercept = v, linetype = "dashed", color = thr_col)
+            p <- p +
+              geom_vline(xintercept = v, linetype = "dashed", color = thr_col)
           }
         }
       }
     }
 
-    # Optional: overlay max-curvature point if available
-    if (exists("effective_thresholds_df") && nrow(effective_thresholds_df) > 0) {
-      row_eff <- dplyr::filter(effective_thresholds_df, Model == key)
-      x_star <- if (nrow(row_eff)) suppressWarnings(as.numeric(row_eff$Max_Curvature_x[1])) else NA_real_
-      if (is.finite(x_star)) {
-        y_star <- tryCatch(
-          predict(model, newdata = setNames(data.frame(x_star), predictor), type = "response"),
-          error = function(e) NA_real_
-        )
-        if (is.finite(y_star)) {
-          p <- p +
-            geom_point(aes(x = x_star, y = y_star), color = thr_col, size = 3) +
-            annotate("text", x = x_star, y = y_star, label = "Max curvature",
-                     hjust = -0.05, vjust = -0.8, color = thr_col, size = 3)
-        }
-      }
-    }
-
-    # NEW: Shade regions where bootstrap slope CI excludes 0 (if available)
+    # ✅ Bootstrap slope shading
     if (exists("gam_slope_boot_df") && nrow(gam_slope_boot_df) > 0) {
-      slope_dat <- gam_slope_boot_df %>% dplyr::filter(Model == key)
+      slope_dat <- gam_slope_boot_df %>% filter(Model == key)
+
       if (nrow(slope_dat) > 0) {
         xg <- slope_dat[[predictor]]
-        sig <- with(slope_dat, ifelse(slope_q025 > 0 | slope_q975 < 0, TRUE, FALSE))
+        sig <- with(slope_dat,
+                    ifelse(slope_q025 > 0 | slope_q975 < 0, TRUE, FALSE))
+
         if (any(sig, na.rm = TRUE)) {
-          p <- p + geom_ribbon(
-            data = data.frame(x = xg, sig = sig),
-            aes(x = x, ymin = -Inf, ymax = Inf),
-            inherit.aes = FALSE,
-            fill = "orange", alpha = 0.06
-          )
+          p <- p +
+            geom_ribbon(
+              data = data.frame(x = xg, sig = sig),
+              aes(x = x, ymin = -Inf, ymax = Inf),
+              inherit.aes = FALSE,
+              fill = "orange", alpha = 0.05
+            )
         }
       }
     }
+  }
 
-    # NEW: Add zero-crossings from bootstrap-median slope (if summarised)
-    if (exists("gam_slope_boot_summary_df") && nrow(gam_slope_boot_summary_df) > 0) {
-      crow <- dplyr::filter(gam_slope_boot_summary_df, Model == key)
-      if (nrow(crow) == 1 && !is.na(crow$Slope_Zero_Crossings)) {
-        for (v in as.numeric(strsplit(crow$Slope_Zero_Crossings, ",\\s*")[[1]])) {
-          if (is.finite(v)) {
-            p <- p + geom_vline(xintercept = v, linetype = "dotted", color = "orange")
-          }
-        }
-      }
-    }
+  # =====================
+  # TGAM
+  # =====================
+  if (model_type == "TGAM") {
 
-  } else if (model_type == "TGAM") {
     p <- p +
       geom_line(
         data = pred_df,
@@ -1151,42 +951,115 @@ for (i in seq_len(nrow(model_selection))) {
       ) +
       geom_ribbon(
         data = pred_df,
-        aes(x = .data[[predictor]], ymin = .data[["lower"]], ymax = .data[["upper"]]),
+        aes(x = .data[[predictor]],
+            ymin = .data[["lower"]],
+            ymax = .data[["upper"]]),
         fill = tgam_col, alpha = 0.2
       )
 
-    # Red threshold line and optional bootstrap CI band
-    if (is.finite(thr)) {
-      p <- p + geom_vline(xintercept = thr, linetype = "dashed", color = thr_col)
-
-      if (exists("tgam_boot_summary_df") && !is.null(tgam_boot_summary_df) && nrow(tgam_boot_summary_df) > 0) {
-        rowb <- dplyr::filter(tgam_boot_summary_df, Model == key)
-        if (nrow(rowb) == 1 && is.finite(rowb$c_q025) && is.finite(rowb$c_q975)) {
-          p <- p + annotate("rect", xmin = rowb$c_q025, xmax = rowb$c_q975,
-                            ymin = -Inf, ymax = Inf, alpha = 0.08, fill = thr_col)
-        }
-      }
+    # ✅ Threshold line
+    if (!is.null(thr) && is.finite(thr)) {
+      p <- p +
+        geom_vline(xintercept = thr,
+                   linetype = "dashed",
+                   color = thr_col)
     }
   }
-
-  # 7) (Optional) add titles/subtitles
-  # p <- p + labs(title = paste(response, "~", predictor),
-  #               subtitle = paste("Selected model:", model_type))
 
   plot_list[[key]] <- p
 }
 
-# Combine and print
-combined_plot <- wrap_plots(plot_list, ncol = 4)
-print(combined_plot)
+# ✅ Combine panels (ordered by pressure)
 
-# Save combined figure
-dir.create(here::here("figures"), showWarnings = FALSE, recursive = TRUE)
-ggsave(
-  filename = here::here("figures", paste0("nafo_combined_", region, ".png")),
-  plot     = combined_plot,
-  width    = 16, height = 12, units = "in", dpi = 600, bg = "white"
+combined_plot <- wrap_plots(
+  plot_list,
+  ncol = length(unique(plot_df$Predictor)),
+  byrow = FALSE   # ✅ THIS IS THE KEY LINE
 )
+
+
+# ✅ Save output
+dir.create(here::here("figures"), showWarnings = FALSE, recursive = TRUE)
+
+ggsave(
+  filename = here::here("figures", paste0("bestmodel_", region, ".png")),
+  plot = combined_plot,
+  width = 20, height = 12,
+  units = "in",
+  dpi = 600,
+  bg = "white"
+)
+
+```
+
+# split plots by indicator
+```{r}
+
+ # ✅ Define global indicator order (REQUIRED)
+all_responses <- sort(unique(model_selection$Response))
+
+# ✅ Split by pressure (rows)
+plot_groups <- plot_df %>%
+  group_split(Predictor)
+
+grouped_plot_list <- list()
+
+for (grp in plot_groups) {
+
+  pred_name <- unique(grp$Predictor)
+
+  # ✅ create full indicator grid
+  subplots <- vector("list", length(all_responses))
+  names(subplots) <- all_responses
+
+  for (resp in all_responses) {
+
+    row_match <- grp %>% filter(Response == resp)
+
+    if (nrow(row_match) == 1) {
+
+      key <- paste0(resp, "_vs_", pred_name, "_", row_match$Model_Type)
+
+      if (key %in% names(plot_list)) {
+        subplots[[resp]] <- plot_list[[key]]
+      } else {
+        subplots[[resp]] <- ggplot() + theme_void()
+      }
+
+    } else {
+      # ✅ empty panel (kept)
+      subplots[[resp]] <- ggplot() + theme_void()
+    }
+  }
+
+  # ✅ one row per pressure
+  p_group <- wrap_plots(
+    subplots,
+    ncol = length(all_responses),
+    byrow = TRUE
+  ) +
+    plot_annotation(title = pred_name)
+
+  grouped_plot_list[[pred_name]] <- p_group
+}
+
+# ✅ stack rows
+combined_grouped_plot <- wrap_plots(
+  grouped_plot_list,
+  ncol = 1
+)
+
+
+ggsave(
+  filename = here::here("figures", paste0("bestmodel_", region, ".png")),
+  plot = combined_grouped_plot,
+  width = 20,
+  height = 2 * length(grouped_plot_list),  # ✅ dynamic height
+  units = "in",
+  dpi = 600,
+  bg = "white"
+)
+
 
 ```
  
@@ -1243,28 +1116,46 @@ dir.create(here::here("results"), showWarnings = FALSE, recursive = TRUE)
 
 rdata_path <- here::here("results", paste0("ei_threshold_results_", region, ".RData"))
 
-# ---- Step 7 addition: include slope bootstrap outputs and unified thresholds ----
-if (!exists("gam_slope_boot_df")) gam_slope_boot_df <- tibble::tibble()
-if (!exists("gam_slope_boot_summary_df")) gam_slope_boot_summary_df <- tibble::tibble()
-if (!exists("unified_thresholds")) unified_thresholds <- tibble::tibble()
+# ✅ Helper to safely create empty object if missing
+ensure_object <- function(name, default) {
+  if (!exists(name, envir = .GlobalEnv)) {
+    assign(name, default, envir = .GlobalEnv)
+  }
+}
 
+# ✅ Ensure ALL objects exist
+ensure_object("threshold_df", tibble::tibble())
+ensure_object("tgam_boot_summary_df", tibble::tibble())
+ensure_object("tgam_boot_samples", list())
+ensure_object("crossings_df", tibble::tibble())
+ensure_object("effective_thresholds_df", tibble::tibble())
+ensure_object("gam_effective_boot_summary_df", tibble::tibble())
+ensure_object("gam_effective_boot_samples", list())
+ensure_object("gam_slope_boot_df", tibble::tibble())
+ensure_object("gam_slope_boot_summary_df", tibble::tibble())
+ensure_object("unified_thresholds", tibble::tibble())
+ensure_object("model_list", list())
+
+# ✅ Now safe to save
 save(
   best_models_table,
   model_selection,
   comparison_results,
-  threshold_df,                 # tGAM thresholds (point)
-  tgam_boot_summary_df,         # tGAM threshold CI summary
-  tgam_boot_samples,            # tGAM bootstrap draws (raw)
-  crossings_df,                 # robust GAM derivative crossings
-  effective_thresholds_df,      # GAM effective thresholds (point)
-  gam_effective_boot_summary_df,# GAM effective thresholds CI summary
-  gam_effective_boot_samples,   # GAM bootstrap draws (raw)
-  gam_slope_boot_df,            # NEW: GAM slope bootstrap grid (per model)
-  gam_slope_boot_summary_df,    # NEW: slope onset & zero-crossings summaries
-  unified_thresholds,           # NEW: unified thresholds table
+  threshold_df,
+  tgam_boot_summary_df,
+  tgam_boot_samples,
+  crossings_df,
+  effective_thresholds_df,
+  gam_effective_boot_summary_df,
+  gam_effective_boot_samples,
+  gam_slope_boot_df,
+  gam_slope_boot_summary_df,
+  unified_thresholds,
   model_list,
   file = rdata_path
 )
+
 message("Saved .RData: ", rdata_path)
+
 
 ```

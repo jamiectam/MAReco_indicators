@@ -14,7 +14,10 @@ library(patchwork)
 library(marea)
 ```
 
-# ESS regional LONG indicators
+
+
+
+ESS regional LONG indicators
 ```{r}
 # get data
 data("eco_indicators")
@@ -106,6 +109,158 @@ mtlc<-mtlc_esswss |>
 indicators_ess<-cbind(indicators_ess, mtlc)
 
 ```
+# ESS regional LONG indicators
+```{r}
+# get data
+data("eco_indicators")
+load("D:/Work projects/MAReco_indicators/INDICATORS/mtlc_esswss.Rdata")
+
+ei_ess<-eco_indicators[eco_indicators@data$region=="ESS"]
+#collect fishing/landings pressures
+pressures_ess<-ei_ess@data |> 
+    select(year,
+           landings_all=landings_ALL_value, 
+           landings_forage=landings_FORAGE.L_value,
+           landings_largepelagic=landings_LARGE_PELAGIC.L_value,
+           landings_flatfish=landings_FLATFISH.L_value,
+           landing_skates=landings_SKATES.L_value,
+           mtl_landings=MeanTL.Landings_value,
+           mti_landings=MTI.Landings_3.25_value,
+           diversity_tspp=DiversityTargetSpp_ALL_value,
+           fp_all=FP_ALL_value,
+           fp_clupeids=FP_CLUPEIDS_value
+           )
+
+#collect environmental pressures
+data("amo")
+data("azmp_bottom_temperature")
+data("nao")
+data("azmp_stratification")
+data("azmp_salinity")
+
+amo_annual <- amo@data |> 
+  group_by(year) |> 
+  summarise(amo_mean = mean(SSTA_value, na.rm = TRUE)) |> 
+  filter(year %in% 1970:2022) |> 
+  select(amo_mean)
+
+nao_annual <- nao@data |> 
+  filter(year %in% 1970:2022) |> 
+  select(nao=anomaly_value)
+
+stratification_annual <-azmp_stratification@data |> 
+  filter(year %in% 1970:2022) |> 
+  select(stratification=mean_value)
+
+salinity_annual <-azmp_salinity@data |> 
+  filter(year %in% 1970:2022) |> 
+  select(salinity=mean_value)
+
+bottom_temp <- azmp_bottom_temperature@data |> 
+    filter(region %in% c("4Vn", "4Vs", "4W"), year %in% 1970:2022) %>%
+    group_by(year) %>%
+    summarise(bottom_temp = mean(mean_value, na.rm = FALSE)) %>%
+    complete(year=1970:2022) |> 
+  mutate(
+    b_temp = zoo::na.approx(bottom_temp, na.rm = FALSE)) |> 
+  select(bottom_temp=b_temp)
+
+#from azmpdata 
+cil_volume <- azmpdata::Derived_Annual_Broadscale |>
+  select(area, year, cold_intermediate_layer_volume) |>
+  filter(area == "scotian_shelf_grid") |>
+  complete(year = 1970:2022) |>
+  arrange(year) |>
+mutate(
+    # convert zeros to NA
+    cold_intermediate_layer_volume = na_if(cold_intermediate_layer_volume, 0),
+    
+    # then impute
+    cil_volume = zoo::na.approx(
+      cold_intermediate_layer_volume,
+      na.rm = FALSE)
+) |> 
+  filter(year %in% 1970:2022) |> 
+  select(cil_volume)
+
+#ice_volume derived from ice.max
+dat<-gslea::EA.query.f(years=1900:2022, variables=c("ice.max"), EARs=1:7)
+
+ ice_max_volume <- dat |> #sum ice.max across all EAR (gulf regions)
+    group_by(year) |>
+    summarise(
+        total_ice_max = sum(value, na.rm = TRUE)
+    )
+ ice_vol<-ice_max_volume |> 
+   mutate(ice_vol=total_ice_max/3) |>  #back of the envelope calculation based on comparisons with benoit's data in azmpdata
+   add_row(year = 1975, ice_vol = NA) |> #missing 1975
+   filter(year>= 1970, year<=2022) |> 
+   select(ice_vol)
+
+env_ess <- dplyr::bind_cols(
+  tibble(year = 1970:2022),
+  bottom_temp,
+  nao_annual,
+  amo_annual,
+  stratification_annual,
+  salinity_annual,
+  ice_vol,
+  cil_volume
+)
+
+
+#bind everything
+pressures_ess <- dplyr::left_join(pressures_ess, env_ess, by = "year")
+
+#remove weird 2021 fpall value >3, probably also weird
+pressures_ess[52,"fp_all"]<-NA
+
+indicators_ess<-ei_ess@data |> 
+    select(year,
+           heips=Heips_ALL_value,
+           lfi=LargeFishIndicator_value,
+           mla=MeanLengthABUNDANCE_value,
+           condition_finfish=CCondition_FINFISH_value,
+           condition_zoopiscivore=CCondition_ZOOPISCIVORE_value, 
+           mls=MeanLifespan_value,
+           biomass_all=BIOMASS_ALL_value,
+           biomass_flatfish=BIOMASS_FLATFISH_value,
+           biomass_gadoids=BIOMASS_GADOIDS_value,
+           biomass_skates=BIOMASS_SKATES_value,
+           biomass_forage=BIOMASS_FORAGE_value,
+           ivi_landings=IVILandings_value
+           )
+mtlc<-mtlc_esswss |> #this is found in the INDICATORS folder
+  filter(ID %in% "ESS") |> 
+  select(MeanTLCommunity)
+#join columns
+indicators_ess<-cbind(indicators_ess, mtlc)
+
+clean_data <- function(df) {
+  df |>
+    arrange(year) |>
+    mutate(
+      across(where(is.numeric) & !matches("year"),
+        ~ na_if(.x, 0)
+      ),
+      across(where(is.numeric) & !matches("year"),
+        ~ zoo::na.approx(.x, na.rm = FALSE, rule = 2)
+      )
+    )
+}
+
+
+pressures_ess  <- clean_data(pressures_ess)
+indicators_ess <- clean_data(indicators_ess)
+
+ess_data_longts <- list(
+  year = 1970:2022,
+  indicators = indicators_ess,
+  pressures = pressures_ess
+)
+
+# save(ess_data_longts, file=here("data_thresholds", "ess_data_longts.Rdata"))
+```
 
 # WSS regional LONG indicators
 ```{r}
@@ -115,7 +270,8 @@ data("eco_indicators")
 ei_wss<-eco_indicators[eco_indicators@data$region=="WSS"]
 #collect fishing/landings pressures
 pressures_wss<-ei_wss@data |> 
-    select(landings_all=landings_ALL_value, 
+    select(year,
+           landings_all=landings_ALL_value, 
            landings_forage=landings_FORAGE.L_value,
            landings_largepelagic=landings_LARGE_PELAGIC.L_value,
            landings_flatfish=landings_FLATFISH.L_value,
@@ -152,15 +308,28 @@ stratification_annual <-azmp_stratification@data |>
   select(stratification=mean_value)
 
 bottom_temp<-azmp_bottom_temperature@data |> 
-  filter(region %in% "4W") |>
+  filter(region %in% "4X") |>
   filter(year %in% 1970:2022) |> 
   complete(year=1970:2022) |> 
   select(bottom_temp=mean_value)
 
-#from azmpdata
-cil_volume<-azmpdata::Derived_Annual_Broadscale |> 
-select(area, year, cold_intermediate_layer_volume) |> 
-  filter(area=="scotian_shelf_grid")
+#from azmpdata 
+cil_volume <- azmpdata::Derived_Annual_Broadscale |>
+  select(area, year, cold_intermediate_layer_volume) |>
+  filter(area == "scotian_shelf_grid") |>
+  complete(year = 1970:2022) |>
+  arrange(year) |>
+mutate(
+    # convert zeros to NA
+    cold_intermediate_layer_volume = na_if(cold_intermediate_layer_volume, 0),
+    
+    # then impute
+    cil_volume = zoo::na.approx(
+      cold_intermediate_layer_volume,
+      na.rm = FALSE)
+) |> 
+  filter(year %in% 1970:2022) |> 
+  select(cil_volume)
 
 #ice_volume derived from ice.max
 dat<-gslea::EA.query.f(years=1900:2022, variables=c("ice.max"), EARs=1:7)
@@ -176,15 +345,27 @@ dat<-gslea::EA.query.f(years=1900:2022, variables=c("ice.max"), EARs=1:7)
    filter(year>= 1970, year<=2022) |> 
    select(ice_vol)
  
+ 
+env_wss <- dplyr::bind_cols(
+  tibble(year = 1970:2022),
+  bottom_temp,
+  nao_annual,
+  amo_annual,
+  stratification_annual,
+  salinity_annual,
+  ice_vol,
+  cil_volume
+)
 
 #bind everything
-pressures_wss<- cbind(pressures_wss, bottom_temp, nao_annual, amo_annual, salinity_annual, stratification_annual, ice_vol)
+pressures_wss <- dplyr::left_join(pressures_wss, env_wss, by = "year")
 
 #remove weird 2021 fpall value >3, probably also weird
 pressures_wss[52,"fp_all"]<-NA
 
 indicators_wss<-ei_wss@data |> 
-    select(heips=Heips_ALL_value,
+    select(year,
+           heips=Heips_ALL_value,
            lfi=LargeFishIndicator_value,
            mla=MeanLengthABUNDANCE_value,
            condition_finfish=CCondition_FINFISH_value,
@@ -203,37 +384,70 @@ mtlc<-mtlc_esswss |>
 #join columns
 indicators_wss<-cbind(indicators_wss, mtlc)
 
+clean_data <- function(df) {
+  df |>
+    arrange(year) |>
+    mutate(
+      across(where(is.numeric) & !matches("year"),
+        ~ na_if(.x, 0)
+      ),
+      across(where(is.numeric) & !matches("year"),
+        ~ zoo::na.approx(.x, na.rm = FALSE, rule = 2)
+      )
+    )
+}
+
+
+pressures_wss  <- clean_data(pressures_wss)
+indicators_wss <- clean_data(indicators_wss)
+
+wss_data_longts <- list(
+  year = 1970:2022,
+  indicators = indicators_wss,
+  pressures = pressures_wss
+)
+
+# save(wss_data_longts, file=here("data_thresholds", "wss_data_longts.Rdata"))
+
 ```
 
-
-# ESS short indicators
 ```{r}
-# get data
-data("eco_indicators")
+add_lags <- function(df, vars, lags = 1:5) {
+  df |>
+    arrange(year) |>
+    mutate(
+      across(all_of(vars),
+        list(
+          !!!setNames(lags, paste0("lag", lags)) |> 
+            lapply(function(l) function(x) dplyr::lag(x, l))
+        ),
+        .names = "{.col}_{.fn}"
+      )
+    )
+}
 
-ei_ess<-eco_indicators[eco_indicators@data$region=="ESS"]
+#example of lagging pressures
+pressure_vars <- ess_full |>
+  select(-year,
+         -heips, -lfi, -mla, -condition_finfish,
+         -condition_zoopiscivore, -mls,
+         -biomass_all, -biomass_flatfish,
+         -biomass_gadoids, -biomass_skates,
+         -biomass_forage, -ivi_landings,
+         -MeanTLCommunity) |>
+  names()
 
-indicators_wss<-ei_wss@data |> 
-    select(heips=Heips_ALL_value,
-           lfi=LargeFishIndicator_value,
-           mla=MeanLengthABUNDANCE_value,
-           condition_finfish=CCondition_FINFISH_value,
-           condition_zoopiscivore=CCondition_ZOOPISCIVORE_value, 
-           mls=MeanLifespan_value,
-           biomass_all=BIOMASS_ALL_value,
-           biomass_flatfish=BIOMASS_FLATFISH_value,
-           biomass_gadoids=BIOMASS_GADOIDS_value,
-           biomass_skates=BIOMASS_SKATES_value,
-           biomass_forage=BIOMASS_FORAGE_value,
-           ivi_landings=IVILandings_value,
-           margalef_richness= 
-           )
-mtlc<-mtlc_esswss |> 
-  filter(ID %in% "WSS") |> 
-  select(MeanTLCommunity)
+#example 1-5 years
+ess_full_lags <- add_lags(
+  ess_full,
+  vars = pressure_vars,
+  lags = 1:5
+)
+
 
 
 ```
+
 
 # OTHER STUFF for gathering data which was not really flexible enough.
 
