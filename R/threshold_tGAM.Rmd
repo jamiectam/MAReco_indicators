@@ -298,10 +298,10 @@ slope_zero_crossings <- function(slope_df, xvar) {
 # indicator pressure setup
 ```{r}
 # --- Region label (used in filenames) ---
-region <- "ess_strfunc"
+region <- "ess"
 
 indicators <- ess_data_longts$indicators |> 
-  select(lfi, mla, condition_finfish, condition_zoopiscivore)
+  select(-year)
 pressures  <- ess_data_longts$pressures |> select(-year)
 ```
 

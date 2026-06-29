@@ -5,13 +5,34 @@ date: "`r Sys.Date()`"
 output: html_document
 ---
 
+# adjust data
+```{r}
+pressures_ess<-pressures_ess |> 
+              select (-year)
+indicators_ess<-indicators_ess |> 
+              select(-year)
 
-# more universal gfa
+pressures_wss<-pressures_wss |> 
+              select (-year)
+indicators_wss<-indicators_wss |> 
+              select(-year)
+```
+
+
+# run code for gfa functions (run after the universal gfa code)
 ```{r}
 ## USAGE EXAMPLE (for a region):
 # result <- gradient_forest_main("4X", nafo_pres_4X, nafo_ind_4X, save_dir = "gf_results")
 
-# All high-res PNGs and .RData files are now in the "data" folderw you have all key outputs as .RData in "data", and results loaded in 'result' list.
+ess_long_result<-gradient_forest_main("ess", pressures_ess, indicators_ess, save_dir = "gf_results")
+
+wss_long_result<-gradient_forest_main("wss", pressures_wss, indicators_wss, save_dir = "gf_results")
+
+# All high-res PNGs and .RData files are now in the "data" folder you have all key outputs as .RData in "data", and results loaded in 'result' list.
+```
+# RUN THIS FIRST more universal gfa
+```{r}
+source("D:/WOrk projects/MAReco_indicators/R/gf_plot_utils.R")
 
 gradient_forest_main <- function(region_abbr, env_data, bio_data, save_dir = "gf_results") {
   
@@ -19,15 +40,24 @@ gradient_forest_main <- function(region_abbr, env_data, bio_data, save_dir = "gf
   require(reshape2)
   require(ggplot2)
   require(extendedForest)
+  require(missForest)
+  
+  set.seed(888)
   
   # Ensure results directory exists:
   if (!dir.exists(save_dir)) dir.create(save_dir)
+  
+  #ensure helpers are loaded
+if (!exists("spRatio")) {
+  stop("GF plotting helpers not loaded. Please source gf_plot_utils.R")
+}
+
   
   # Combine and impute missing values
   dat <- cbind(env_data, bio_data)
   ind.name <- colnames(bio_data)
   dri.name <- colnames(env_data)
-  dat <- na.roughfix(dat)
+  dat <- missForest(dat)$ximp #na.roughfix(dat)
   
   # Fit gradient forest
   lev <- floor(log2(nrow(dat) * 0.368/2))
@@ -37,7 +67,7 @@ gradient_forest_main <- function(region_abbr, env_data, bio_data, save_dir = "gf
     response.vars = ind.name,
     ntree = 1000,
     transform = NULL,
-    maxLevel = 1,
+    maxLevel = lev,
     corr.threshold = 0.5,
     compact = FALSE,
     trace = TRUE
@@ -179,7 +209,7 @@ dri.name<-colnames(ccenv1)
 
 # Many of the pressure variables do not have full data (some NA):
 ## Option 1- Impute:
-dat <- na.roughfix(dat)
+dat <- missForest(dat)$ximp #na.roughfix(dat) previously
 #
 
 
