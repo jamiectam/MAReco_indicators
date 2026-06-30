@@ -298,11 +298,11 @@ slope_zero_crossings <- function(slope_df, xvar) {
 # indicator pressure setup
 ```{r}
 # --- Region label (used in filenames) ---
-region <- "ess"
+region <- "wss"
 
-indicators <- ess_data_longts$indicators |> 
+indicators <- wss_data_longts$indicators |> 
   select(-year)
-pressures  <- ess_data_longts$pressures |> select(-year)
+pressures  <- wss_data_longts$pressures |> select(-year)
 ```
 
 # Step 1. Fit GLM GAM tGAM with grid search for correlations 
@@ -1116,6 +1116,64 @@ ggsave(
 )
 
 
+```
+
+# split plots by individual pressure
+```{r}
+# ---- Group plots by pressure and save ----
+
+dir.create(
+  here::here("figures", "by_pressure"),
+  showWarnings = FALSE,
+  recursive = TRUE
+)
+
+pressure_groups <- split(plot_df, plot_df$Predictor)
+
+for (pressure_name in names(pressure_groups)) {
+
+  grp <- pressure_groups[[pressure_name]]
+
+  # Get corresponding plot keys
+  keys <- grp$Model_Key
+
+  # Extract plots
+  pressure_plots <- plot_list[keys]
+
+  # Remove NULLs just in case
+  pressure_plots <- pressure_plots[!sapply(pressure_plots, is.null)]
+
+  if (length(pressure_plots) == 0) next
+
+  # Arrange plots for this pressure
+  pressure_panel <- wrap_plots(
+    pressure_plots,
+    ncol = min(3, length(pressure_plots))
+  ) +
+    plot_annotation(
+      title = pressure_name
+    )
+
+  # Dynamic height
+  n_rows <- ceiling(length(pressure_plots) /
+                      min(3, length(pressure_plots)))
+
+  ggsave(
+    filename = here::here(
+      "figures",
+      "by_pressure",
+      paste0("pressure_", pressure_name, "_", region, ".png")
+    ),
+    plot = pressure_panel,
+    width = 12,
+    height = max(4, 4 * n_rows),
+    units = "in",
+    dpi = 600,
+    bg = "white"
+  )
+
+  message("Saved: ", pressure_name)
+}
 ```
  
 # Step 9. Derivative panel grid (slope curve with CI)
