@@ -169,7 +169,7 @@ fit_threshold_gam <- function(df, resp, pres,
       silent = TRUE
     )
     if (inherits(fit, "try-error")) next
-    score <- fit$AIC(fit)
+    score <- AIC(fit)
     if (!is.finite(score)) next
     if (score < best_score) { best <- fit; best_score <- score; best_c <- c0 }
   }
@@ -305,42 +305,97 @@ indicators <- ess_data_longts$indicators |>
 pressures  <- ess_data_longts$pressures |> select(-year)
 ```
 
-# Step 1. Fit GLM GAM threshold GAM with grid search for correlations
+# Step 1. Fit GLM GAM tGAM with grid search for correlations 
 ```{r}
-# ---- Step 1: Fit models ----
+# ---- Step 1: Fit GLM, GAM, and tGAM models ----
 
 model_list <- list()
 
 for (a_col in names(indicators)) {
+
   for (b_col in names(pressures)) {
+
     tryCatch({
-      df <- data.frame(resp = indicators[[a_col]], pres = pressures[[b_col]])
-      colnames(df) <- c(a_col, b_col)
+
+      # Create paired dataset
+      df <- data.frame(
+        resp = indicators[[a_col]],
+        pres = pressures[[b_col]]
+      )
+
+      names(df) <- c(a_col, b_col)
+
       df <- na.omit(df)
-      if (nrow(df) < 10 || var(df[[b_col]]) == 0 || var(df[[a_col]]) == 0) next
 
+      # Basic data checks
+      if (nrow(df) < 10) next
+
+      if (var(df[[a_col]], na.rm = TRUE) == 0) next
+      if (var(df[[b_col]], na.rm = TRUE) == 0) next
+
+      # -------------------------------
       # GAM
-      gam_model <- gam(as.formula(paste(a_col, "~ s(", b_col, ")")),
-                       data = df, method = fit_method, family = tw(),
-                       select = use_select, gamma = gamma_val)
+      # -------------------------------
+      gam_model <- mgcv::gam(
+        as.formula(
+          paste0(a_col, " ~ s(", b_col, ")")
+        ),
+        data = df,
+        family = tw(),
+        method = fit_method,
+        select = use_select,
+        gamma = gamma_val
+      )
 
-      # GLM via gam()
-      glm_model <- gam(as.formula(paste(a_col, "~", b_col)),
-                       data = df, method = fit_method, family = tw(),
-                       select = use_select, gamma = gamma_val)
+      # -------------------------------
+      # GLM (fit through gam)
+      # -------------------------------
+      glm_model <- mgcv::gam(
+        as.formula(
+          paste0(a_col, " ~ ", b_col)
+        ),
+        data = df,
+        family = tw(),
+        method = fit_method,
+        select = use_select,
+        gamma = gamma_val
+      )
 
-      # tGAM
-      tgam_model <- fit_threshold_gam(df, resp = a_col, pres = b_col, family = tw())
+      # -------------------------------
+      # Threshold GAM
+      # -------------------------------
+      tgam_model <- fit_threshold_gam(
+        df,
+        resp   = a_col,
+        pres   = b_col,
+        family = tw()
+      )
 
-      base <- paste(a_col, b_col, sep = "_vs_")
-      model_list[[paste0(base, "_GAM")]] <- gam_model
-      model_list[[paste0(base, "_GLM")]] <- glm_model
-      if (!is.null(tgam_model)) model_list[[paste0(base, "_TGAM")]] <- tgam_model
+      # -------------------------------
+      # Save models
+      # -------------------------------
+      model_base <- paste(a_col, b_col, sep = "_vs_")
+
+      model_list[[paste0(model_base, "_GAM")]] <- gam_model
+      model_list[[paste0(model_base, "_GLM")]] <- glm_model
+
+      if (!is.null(tgam_model)) {
+        model_list[[paste0(model_base, "_TGAM")]] <- tgam_model
+      }
+
     }, error = function(e) {
-      message("Error fitting models for ", a_col, " vs ", b_col, ": ", e$message)
+
+      message(
+        "Error fitting models for ",
+        a_col, " vs ", b_col,
+        ": ", conditionMessage(e)
+      )
+
     })
   }
 }
+
+message("Finished fitting ", length(model_list), " models.")
 
 
 ```
@@ -1159,3 +1214,54 @@ message("Saved .RData: ", rdata_path)
 
 
 ```
+
+#save as csv
+```{r}
+
+
+# ---- Save CSV versions of results ----
+
+write.csv(
+  model_selection,
+  here::here("results", paste0("model_selection_", region, ".csv")),
+  row.names = FALSE
+)
+
+write.csv(
+  best_models_table,
+  here::here("results", paste0("best_models_", region, ".csv")),
+  row.names = FALSE
+)
+
+write.csv(
+  unified_thresholds,
+  here::here("results", paste0("unified_thresholds_", region, ".csv")),
+  row.names = FALSE
+)
+
+write.csv(
+  comparison_results,
+  here::here("results", paste0("comparison_results_", region, ".csv")),
+  row.names = FALSE
+)
+
+message("Saved CSV tables to: ", here::here("results"))
+
+
+# ---- Save indicator and pressure datasets ----
+
+write_csv(
+  indicators,
+  here::here("data_thresholds", paste0("indicators_", region, ".csv"))
+)
+
+write_csv(
+  pressures,
+  here::here("data_thresholds", paste0("pressures_", region, ".csv"))
+)
+
+message("Saved indicators and pressures CSV files.")
+
+
+```
+
