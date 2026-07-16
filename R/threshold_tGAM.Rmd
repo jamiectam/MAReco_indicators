@@ -298,11 +298,11 @@ slope_zero_crossings <- function(slope_df, xvar) {
 # indicator pressure setup
 ```{r}
 # --- Region label (used in filenames) ---
-region <- "wss"
+region <- "ess"
 
-indicators <- wss_data_longts$indicators |> 
+indicators <- ess_data_longts$indicators |> 
   select(-year)
-pressures  <- wss_data_longts$pressures |> select(-year)
+pressures  <- ess_data_longts$pressures |> select(-year)
 ```
 
 # Step 1. Fit GLM GAM tGAM with grid search for correlations 

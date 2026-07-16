@@ -629,4 +629,25 @@ build_dataset <- function(region_name = "ESS", years = 1970:2022) {
 }
 ```
 
+#save data as .csv
+```{r}
+# Save indicators
+write.csv(ess_data_longts$indicators,
+          file=here("data_thresholds", "indicators_ess.csv"),
+          row.names = FALSE)
+
+# Save pressures
+write.csv(ess_data_longts$pressures,
+          file = here("data_thresholds", "pressures_ess.csv"),
+          row.names = FALSE)
+
+write.csv(wss_data_longts$indicators,
+          file=here("data_thresholds", "indicators_wss.csv"),
+          row.names = FALSE)
+
+# Save pressures
+write.csv(wss_data_longts$pressures,
+          file = here("data_thresholds", "pressures_wss.csv"),
+          row.names = FALSE)
+```
 
