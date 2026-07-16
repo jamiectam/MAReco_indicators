@@ -468,52 +468,47 @@ print(comparison_results)
 
 # Step 3. Model Selection
 ```{r}
-# ---- Step 3: Strict single-model selection ----
+# ---- Step 3: Strict single-model selection (with diagnostics) ----
 
 model_selection <- comparison_results %>%
-  filter(Model_Type %in% c("GLM", "GAM", "TGAM")) %>%
   group_by(Response, Predictor) %>%
-  mutate(
-    # Identify best GAM/GLM
-    best_non_tgam_aic = min(AIC[Model_Type != "TGAM"], na.rm = TRUE),
+  group_modify(~{
 
-    # Identify best TGAM
-    tgam_aic = ifelse(Model_Type == "TGAM", AIC, NA_real_),
-    tgam_p   = ifelse(Model_Type == "TGAM", p_value, NA_real_),
+    df <- .x
 
-    tgam_aic_best = min(tgam_aic, na.rm = TRUE),
-    tgam_p_best   = min(tgam_p, na.rm = TRUE),
+    best_non_tgam <- df %>%
+      filter(Model_Type %in% c("GLM", "GAM")) %>%
+      slice_min(AIC, n = 1, with_ties = FALSE)
 
-    # Compute delta AIC
-    delta_aic = tgam_aic_best - best_non_tgam_aic,
+    tgam_row <- df %>%
+      filter(Model_Type == "TGAM")
 
-    # Decision: only accept TGAM if justified
-    pick_tgam = !is.infinite(tgam_aic_best) & (
-      delta_aic <= -2 |
-      (delta_aic <= 2 & tgam_p_best < alpha)
-    )
-  ) %>%
+    delta_aic <- NA_real_
+    choose_tgam <- FALSE
 
-  summarise(
-    # ✅ pick ONE model per pair
-    Model_Type = if (any(pick_tgam, na.rm = TRUE)) {
-      "TGAM"
-    } else {
-      Model_Type[which.min(AIC[Model_Type != "TGAM"])]
-    },
+    if (nrow(tgam_row) > 0) {
 
-    # ✅ grab row corresponding to selected model
-    AIC        = AIC[Model_Type == cur_data()$Model_Type][1],
-    R_squared  = R_squared[Model_Type == cur_data()$Model_Type][1],
-    EDF        = EDF[Model_Type == cur_data()$Model_Type][1],
-    GCV_UBRE   = GCV_UBRE[Model_Type == cur_data()$Model_Type][1],
-    p_value    = p_value[Model_Type == cur_data()$Model_Type][1],
+      delta_aic <- tgam_row$AIC - best_non_tgam$AIC
 
-    .groups = "drop"
-  )
+      choose_tgam <-
+        delta_aic <= -2 ||
+        (delta_aic <= 2 && tgam_row$p_value < alpha)
+    }
 
+    selected <- if (choose_tgam) tgam_row else best_non_tgam
+
+    selected %>%
+      mutate(
+        Delta_AIC_TGAM = delta_aic,
+        TGAM_Selected = choose_tgam
+      )
+
+  }) %>%
+  ungroup() %>%
+  arrange(Response, Predictor)
 
 print(model_selection)
+
 ```
 
 # Step 4. Threshold analysis
