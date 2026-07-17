@@ -448,6 +448,571 @@ ess_full_lags <- add_lags(
 
 ```
 
+# WSS data + QA/QC
+```{r}
+###############################
+# WSS DATA PREPARATION + QA/QC
+###############################
+
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(tibble)
+library(zoo)
+
+###############################
+# LOAD DATA
+###############################
+
+data("eco_indicators")
+
+ei_wss <- eco_indicators[
+  eco_indicators@data$region == "WSS"
+]
+
+###############################
+# PRESSURES
+###############################
+
+pressures_wss <- ei_wss@data |>
+  select(
+    year,
+    landings_all = landings_ALL_value,
+    landings_forage = landings_FORAGE.L_value,
+    landings_largepelagic = landings_LARGE_PELAGIC.L_value,
+    landings_flatfish = landings_FLATFISH.L_value,
+    landing_skates = landings_SKATES.L_value,
+    mtl_landings = MeanTL.Landings_value,
+    mti_landings = MTI.Landings_3.25_value,
+    diversity_tspp = DiversityTargetSpp_ALL_value,
+    fp_all = FP_ALL_value,
+    fp_clupeids = FP_CLUPEIDS_value
+  )
+
+###############################
+# ENVIRONMENTAL PRESSURES
+###############################
+
+data("amo")
+data("nao")
+data("azmp_bottom_temperature")
+data("azmp_salinity")
+
+amo_annual <- amo@data |>
+  group_by(year) |>
+  summarise(
+    amo_mean = mean(SSTA_value, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  filter(year %in% 1970:2022) |>
+  select(amo_mean)
+
+nao_annual <- nao@data |>
+  filter(year %in% 1970:2022) |>
+  select(
+    nao = anomaly_value
+  )
+
+salinity_annual <- azmp_salinity@data |>
+  filter(year %in% 1970:2022) |>
+  select(
+    salinity = mean_value
+  )
+
+stratification_annual <- azmp_stratification@data |>
+  filter(year %in% 1970:2022) |>
+  select(
+    stratification = mean_value
+  )
+
+bottom_temp <- azmp_bottom_temperature@data |>
+  filter(region == "4X") |>
+  filter(year %in% 1970:2022) |>
+  complete(year = 1970:2022) |>
+  select(
+    bottom_temp = mean_value
+  )
+
+cil_volume <- azmpdata::Derived_Annual_Broadscale |>
+  select(
+    area,
+    year,
+    cold_intermediate_layer_volume
+  ) |>
+  filter(area == "scotian_shelf_grid") |>
+  complete(year = 1970:2022) |>
+  arrange(year) |>
+  mutate(
+    cold_intermediate_layer_volume =
+      na_if(cold_intermediate_layer_volume, 0),
+    cil_volume =
+      zoo::na.approx(
+        cold_intermediate_layer_volume,
+        na.rm = FALSE
+      )
+  ) |>
+  select(cil_volume)
+
+dat <- gslea::EA.query.f(
+  years = 1900:2022,
+  variables = "ice.max",
+  EARs = 1:7
+)
+
+ice_max_volume <- dat |>
+  group_by(year) |>
+  summarise(
+    total_ice_max = sum(value, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+ice_vol <- ice_max_volume |>
+  mutate(
+    ice_vol = total_ice_max / 3
+  ) |>
+  add_row(
+    year = 1975,
+    ice_vol = NA
+  ) |>
+  filter(
+    year >= 1970,
+    year <= 2022
+  ) |>
+  select(ice_vol)
+
+env_wss <- bind_cols(
+  tibble(year = 1970:2022),
+  bottom_temp,
+  nao_annual,
+  amo_annual,
+  stratification_annual,
+  salinity_annual,
+  ice_vol,
+  cil_volume
+)
+
+pressures_wss <- left_join(
+  pressures_wss,
+  env_wss,
+  by = "year"
+)
+
+###############################
+# INDICATORS
+###############################
+
+indicators_wss <- ei_wss@data |>
+  select(
+    year,
+    heips = Heips_ALL_value,
+    lfi = LargeFishIndicator_value,
+    mla = MeanLengthABUNDANCE_value,
+    condition_finfish = CCondition_FINFISH_value,
+    condition_zoopiscivore = CCondition_ZOOPISCIVORE_value,
+    mls = MeanLifespan_value,
+    biomass_all = BIOMASS_ALL_value,
+    biomass_flatfish = BIOMASS_FLATFISH_value,
+    biomass_gadoids = BIOMASS_GADOIDS_value,
+    biomass_skates = BIOMASS_SKATES_value,
+    biomass_forage = BIOMASS_FORAGE_value,
+    ivi_landings = IVILandings_value
+  )
+
+mtlc <- mtlc_esswss |>
+  filter(ID == "WSS") |>
+  select(MeanTLCommunity)
+
+indicators_wss <- cbind(
+  indicators_wss,
+  mtlc
+)
+
+###############################
+# QA/QC FUNCTIONS
+###############################
+
+# IQR outlier score
+# Score = how far outside bounds an observation lies
+
+outlier_score <- function(x, k = 3) {
+
+  q1 <- quantile(
+    x,
+    probs = 0.25,
+    na.rm = TRUE
+  )
+
+  q3 <- quantile(
+    x,
+    probs = 0.75,
+    na.rm = TRUE
+  )
+
+  iqr <- q3 - q1
+
+  if(iqr == 0 || is.na(iqr)) {
+    return(rep(0, length(x)))
+  }
+
+  lower <- q1 - k * iqr
+  upper <- q3 + k * iqr
+
+  score <- rep(0, length(x))
+
+  score[x < lower] <-
+    (lower - x[x < lower]) / iqr
+
+  score[x > upper] <-
+    (x[x > upper] - upper) / iqr
+
+  score
+}
+
+###############################
+# CREATE REVIEW TABLE
+###############################
+
+create_review_table <- function(df, k = 3) {
+
+  vars <- setdiff(
+    names(df),
+    "year"
+  )
+
+  purrr::map_dfr(vars, function(v) {
+
+    scores <- outlier_score(
+      df[[v]],
+      k = k
+    )
+
+    tibble(
+      year = df$year,
+      variable = v,
+      value = df[[v]],
+      score = scores
+    )
+
+  }) |>
+    filter(score > 0) |>
+    mutate(
+      review_level = case_when(
+        score > 5 ~ "RED",
+        score > 2 ~ "ORANGE",
+        TRUE ~ "YELLOW"
+      )
+    ) |>
+    arrange(desc(score))
+}
+
+###############################
+# REMOVE SELECTED OUTLIERS
+###############################
+
+remove_selected_outliers <- function(df, review_tbl) {
+
+  if(nrow(review_tbl) == 0) {
+    return(df)
+  }
+
+  for(i in seq_len(nrow(review_tbl))) {
+
+    yr <- review_tbl$year[i]
+    var <- review_tbl$variable[i]
+
+    df[df$year == yr, var] <- NA
+
+  }
+
+  df
+}
+
+###############################
+# IMPUTE AND TRACK IMPUTATIONS
+###############################
+
+impute_with_flags <- function(df) {
+
+  imputed_flags <- df |>
+    transmute(
+      across(
+        -year,
+        is.na,
+        .names = "{.col}_imputed"
+      )
+    )
+
+  df_imp <- df |>
+    mutate(
+      across(
+        where(is.numeric) & !matches("^year$"),
+        ~ zoo::na.approx(
+          .x,
+          na.rm = FALSE,
+          rule = 2
+        )
+      )
+    )
+
+  bind_cols(
+    df_imp,
+    imputed_flags
+  )
+}
+
+###############################
+# PREPARE FOR QA
+###############################
+
+pressures_wss <- pressures_wss |>
+  mutate(
+    across(
+      where(is.numeric) & !matches("^year$"),
+      ~ na_if(.x, 0)
+    )
+  )
+
+indicators_wss <- indicators_wss |>
+  mutate(
+    across(
+      where(is.numeric) & !matches("^year$"),
+      ~ na_if(.x, 0)
+    )
+  )
+
+###############################
+# CREATE REVIEW TABLES
+###############################
+
+pressure_review <- create_review_table(
+  pressures_wss,
+  k = 3
+)
+
+indicator_review <- create_review_table(
+  indicators_wss,
+  k = 3
+)
+
+###############################
+# INSPECT OUTLIERS
+###############################
+
+print(pressure_review)
+
+print(indicator_review)
+
+pressure_review |>
+  count(review_level)
+
+indicator_review |>
+  count(review_level)
+
+###############################
+# SAVE REVIEW TABLES
+###############################
+
+write.csv(
+  pressure_review,
+  "pressure_wss_outlier_review.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  indicator_review,
+  "indicator_wss_outlier_review.csv",
+  row.names = FALSE
+)
+
+###############################
+# MANUAL REVIEW DECISIONS
+###############################
+# After inspecting the review tables,
+# add observations you want removed.
+#
+# Example:
+# fp_all 2021 known anomalous value
+
+outliers_to_remove_pressures <- tribble(
+  ~variable, ~year,
+  "fp_all", 2021
+)
+
+# Example indicator table
+outliers_to_remove_indicators <- tribble(
+  ~variable, ~year
+)
+
+###############################
+# REPLACE FLAGGED OUTLIERS
+###############################
+
+pressures_wss <- remove_selected_outliers(
+  pressures_wss,
+  outliers_to_remove_pressures
+)
+
+indicators_wss <- remove_selected_outliers(
+  indicators_wss,
+  outliers_to_remove_indicators
+)
+
+###############################
+# IMPUTE MISSING VALUES
+###############################
+
+pressures_wss <- impute_with_flags(
+  pressures_wss
+)
+
+indicators_wss <- impute_with_flags(
+  indicators_wss
+)
+
+###############################
+# FINAL DATA OBJECT
+###############################
+
+wss_data_longts <- list(
+  year = 1970:2022,
+  indicators = indicators_wss,
+  pressures = pressures_wss
+)
+
+###############################
+# OPTIONAL: BUILD LAGS
+###############################
+
+add_lags <- function(
+  df,
+  vars,
+  lags = 1:5
+) {
+
+  df |>
+    arrange(year) |>
+    mutate(
+      across(
+        all_of(vars),
+        list(
+          !!!setNames(
+            lags,
+            paste0("lag", lags)
+          ) |>
+            lapply(
+              function(l) {
+                function(x) dplyr::lag(x, l)
+              }
+            )
+        ),
+        .names = "{.col}_{.fn}"
+      )
+    )
+}
+
+# Example:
+#
+# pressure_vars <- names(pressures_wss)[
+#   !grepl("_imputed$", names(pressures_wss))
+# ]
+#
+# pressure_vars <- setdiff(
+#   pressure_vars,
+#   "year"
+# )
+#
+# pressures_wss_lags <- add_lags(
+#   pressures_wss,
+#   vars = pressure_vars,
+#   lags = 1:5
+# )
+```
+
+# log x+1 transform and standardize specific columns
+```{r}
+
+# just z-score only for use on env variables (NAO, AMO, bottom temp, biodiveristy, fp anything that could have negative values should only be standardized)
+zscore <- function(x) {
+  as.numeric(scale(x))
+}
+
+vars_to_standardize <- c(
+  "landings_all",
+  "landings_forage",
+  "fp_all"
+)
+
+pressures_wss <- pressures_wss |>
+  mutate(
+    across(
+      all_of(vars_to_standardize),
+      zscore,
+      .names = "{.col}_z"
+    )
+  )
+
+# log x+1 and standardized (zscore)
+transform_indicator <- function(df, var, log_transform = TRUE) {
+
+  if(log_transform) {
+
+    df[[paste0(var, "_logz")]] <-
+      as.numeric(
+        scale(log1p(df[[var]]))
+      )
+
+  } else {
+
+    df[[paste0(var, "_z")]] <-
+      as.numeric(
+        scale(df[[var]])
+      )
+
+  }
+
+  df
+}
+
+vars_to_transform <- c(
+  "landings_all",
+  "landings_forage",
+  "fp_all"
+)
+
+pressures_wss <- pressures_wss |>
+  mutate(
+    across(
+      all_of(vars_to_transform),
+      ~ as.numeric(scale(log1p(.x))),
+      .names = "{.col}_logz"
+    )
+  )
+
+```
+
+# save data as list
+```{r}
+
+wss_data_longts <- list(
+  year = 1970:2022,
+  indicators = indicators_wss,
+  pressures = pressures_wss
+)
+save(wss_data_longts, file=here("data_thresholds", "wss_data_longts.Rdata"))
+
+ess_data_longts <- list(
+  year = 1970:2022,
+  indicators = indicators_ess,
+  pressures = pressures_ess
+)
+
+save(ess_data_longts, file=here("data_thresholds", "ess_data_longts.Rdata"))
+
+```
+
+
+
+
 
 # OTHER STUFF for gathering data which was not really flexible enough.
 
